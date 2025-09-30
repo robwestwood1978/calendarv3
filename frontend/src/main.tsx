@@ -20,6 +20,9 @@ if (typeof window !== 'undefined') {
 
 // Slice C preflight (safe, idempotent; shapes only)
 import './lib/migrateSliceC'
+// Slice C runtime patches (safe when flag is OFF)
+import './lib/agendaPatch'
+import './lib/permissionsPatch'
 
 import React from 'react'
 import { createRoot } from 'react-dom/client'
@@ -34,6 +37,7 @@ import Settings from './pages/Settings'
 import { SettingsProvider } from './state/settings'
 import { AuthProvider } from './auth/AuthProvider'
 import AccountMenu from './components/AccountMenu'
+import MyAgendaSwitch from './components/MyAgendaSwitch'
 import './styles.css'
 
 const root = document.getElementById('root')!
@@ -54,8 +58,9 @@ createRoot(root).render(
           </Routes>
         </BrowserRouter>
 
-        {/* Renders nothing when the feature flag is OFF */}
+        {/* Slice C overlays (render nothing when flag OFF) */}
         <AccountMenu />
+        <MyAgendaSwitch />
       </AuthProvider>
     </SettingsProvider>
   </React.StrictMode>
