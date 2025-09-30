@@ -1,6 +1,6 @@
 // frontend/src/pages/Settings.tsx
 // Keeps your original Settings page (SettingsPage) and appends:
-// - Experiments card (toggle Slice C auth; default OFF)
+// - Experiments card (toggle Slice C auth; default OFF, reloads page when changed)
 // - Account panel (only shown when flag is ON)
 
 import React, { useEffect, useState } from 'react'
@@ -19,6 +19,13 @@ export default function Settings() {
     return () => unsub()
   }, [])
 
+  function onToggleAuth(e: React.ChangeEvent<HTMLInputElement>) {
+    const on = e.currentTarget.checked
+    featureFlags.set({ authEnabled: on })
+    // Hard reload to avoid transient states and ensure seed users are available immediately
+    setTimeout(() => window.location.reload(), 0)
+  }
+
   return (
     <div style={{ display: 'grid', gap: 16 }}>
       {/* Your baseline A/B Settings UI */}
@@ -31,9 +38,9 @@ export default function Settings() {
           <input
             type="checkbox"
             checked={!!flags.authEnabled}
-            onChange={(e) => featureFlags.set({ authEnabled: e.currentTarget.checked })}
+            onChange={onToggleAuth}
           />
-          <span>Enable accounts &ldquo;My agenda&rdquo;</span>
+          <span>Enable accounts (sign-in)</span>
         </label>
         <p style={hint}>When disabled, the app behaves exactly like Slice A/B.</p>
       </section>
@@ -45,8 +52,8 @@ export default function Settings() {
 }
 
 function AccountPanel() {
-  const { currentUser, users, linkMember, unlinkMember } = useAuth()
-  const s = useSettings() // baseline hook; treat as plain data
+  const { currentUser, linkMember, unlinkMember } = useAuth()
+  const s = useSettings() // baseline hook; plain data
   const members = Array.isArray((s as any).members) ? (s as any).members : []
 
   return (
@@ -57,7 +64,9 @@ function AccountPanel() {
         <>
           <p style={hint}>Not signed in. Use the button in the top-right to sign in with a seed account.</p>
           <p style={hint}>
-            Seed users: <code>parent@local.test</code>, <code>adult@local.test</code>, <code>child@local.test</code>
+            Seed users: <code>parent@local.test</code> / <code>parent123</code>,
+            <code> adult@local.test</code> / <code>adult123</code>,
+            <code> child@local.test</code> / <code>child123</code>.
           </p>
         </>
       ) : (
