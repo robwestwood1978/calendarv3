@@ -1,11 +1,8 @@
 // frontend/src/auth/AuthProvider.tsx
-// Offline-first local auth (email + password hashed with SHA-256).
-// Seeds three users for dev. Fully gated by feature flag (authEnabled).
-// Storage keys: fc_users_v1, fc_current_user_v1
+// Offline-first local auth with seed users. Now reacts when the feature flag flips ON.
 
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react'
 import { featureFlags } from '../state/featureFlags'
-import { useSettings } from '../state/settings'
 
 export type UserRole = 'parent' | 'adult' | 'child'
 export type User = {
@@ -74,7 +71,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [users, setUsers] = useState<User[]>(() => loadUsers())
   const [currentId, setCurrentId] = useState<string | null>(() => loadCurrentId())
 
-  // Watch cross-tab changes
+  // Keep users/currentId in sync across tabs
   useEffect(() => {
     const h = () => { setUsers(loadUsers()); setCurrentId(loadCurrentId()) }
     window.addEventListener('storage', h)
@@ -82,27 +79,37 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => { window.removeEventListener('storage', h); window.removeEventListener('fc:users:changed', h) }
   }, [])
 
-  // Seed only if flag ON and no users exist
+  // Seed users on first load *if* flag is ON
   useEffect(() => {
-    const { authEnabled } = featureFlags.get()
-    if (!authEnabled) return
-    if (loadUsers().length > 0) return
-    ;(async () => {
-      const seeded: User[] = []
-      for (const s of seeds) {
-        const hash = await sha256Hex(`${s.email.toLowerCase()}|${s.password}`)
-        seeded.push({ id: uid(), email: s.email.toLowerCase(), role: s.role, passwordHash: hash, linkedMemberIds: [] })
+    if (featureFlags.get().authEnabled && loadUsers().length === 0) {
+      seedUsers().then(() => setUsers(loadUsers()))
+    }
+  }, [])
+
+  // ALSO seed users if the flag flips ON later (Settings → Experiments)
+  useEffect(() => {
+    const unsub = featureFlags.subscribe(() => {
+      const { authEnabled } = featureFlags.get()
+      if (authEnabled && loadUsers().length === 0) {
+        seedUsers().then(() => setUsers(loadUsers()))
       }
-      saveUsers(seeded)
-      setUsers(seeded)
-    })()
+    })
+    return () => unsub()
   }, [])
 
   const currentUser = useMemo(() => users.find(u => u.id === currentId) || null, [users, currentId])
 
+  async function seedUsers() {
+    const seeded: User[] = []
+    for (const s of seeds) {
+      const hash = await sha256Hex(`${s.email.toLowerCase()}|${s.password}`)
+      seeded.push({ id: uid(), email: s.email.toLowerCase(), role: s.role, passwordHash: hash, linkedMemberIds: [] })
+    }
+    saveUsers(seeded)
+  }
+
   async function signIn(email: string, password: string): Promise<boolean> {
-    const { authEnabled } = featureFlags.get()
-    if (!authEnabled) return false
+    if (!featureFlags.get().authEnabled) return false
     const e = email.trim().toLowerCase()
     const hash = await sha256Hex(`${e}|${password}`)
     const u = loadUsers().find(x => x.email === e && x.passwordHash === hash) || null
