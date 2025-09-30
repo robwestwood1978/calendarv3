@@ -8,12 +8,18 @@ if (typeof window !== 'undefined') {
       localStorage.removeItem('fc_settings_v1')
       localStorage.removeItem('fc_settings_v2')
       localStorage.removeItem('fc_settings_v3') // current
+      localStorage.removeItem('fc_feature_flags_v1')
+      localStorage.removeItem('fc_users_v1')
+      localStorage.removeItem('fc_current_user_v1')
       alert('Local data cleared. Reloading…')
     } catch {}
     url.searchParams.delete('reset')
     window.location.replace(url.toString())
   }
 }
+
+// Slice C preflight (safe, idempotent; shapes only)
+import './lib/migrateSliceC'
 
 import React from 'react'
 import { createRoot } from 'react-dom/client'
@@ -26,24 +32,31 @@ import Chores from './pages/Chores'
 import Meals from './pages/Meals'
 import Settings from './pages/Settings'
 import { SettingsProvider } from './state/settings'
+import { AuthProvider } from './auth/AuthProvider'
+import AccountMenu from './components/AccountMenu'
 import './styles.css'
 
 const root = document.getElementById('root')!
 createRoot(root).render(
   <React.StrictMode>
     <SettingsProvider>
-      <BrowserRouter>
-        <Routes>
-          <Route element={<AppLayout />}>
-            <Route index element={<Home />} />
-            <Route path="calendar" element={<Calendar />} />
-            <Route path="lists" element={<Lists />} />
-            <Route path="chores" element={<Chores />} />
-            <Route path="meals" element={<Meals />} />
-            <Route path="settings" element={<Settings />} />
-          </Route>
-        </Routes>
-      </BrowserRouter>
+      <AuthProvider>
+        <BrowserRouter>
+          <Routes>
+            <Route element={<AppLayout />}>
+              <Route index element={<Home />} />
+              <Route path="calendar" element={<Calendar />} />
+              <Route path="lists" element={<Lists />} />
+              <Route path="chores" element={<Chores />} />
+              <Route path="meals" element={<Meals />} />
+              <Route path="settings" element={<Settings />} />
+            </Route>
+          </Routes>
+        </BrowserRouter>
+
+        {/* Renders nothing when the feature flag is OFF */}
+        <AccountMenu />
+      </AuthProvider>
     </SettingsProvider>
   </React.StrictMode>
 )
