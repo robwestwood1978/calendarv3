@@ -1,27 +1,24 @@
 // frontend/src/components/MyAgendaSwitch.tsx
-// Floating "My agenda" toggle that also *refreshes* the events view immediately.
+// Floating "My agenda" toggle that stores state in fc_my_agenda_v1 (never touches fc_settings_v3).
 
 import React, { useEffect, useState } from 'react'
 import { featureFlags } from '../state/featureFlags'
 import { useAuth } from '../auth/AuthProvider'
 
-const LS_SETTINGS = 'fc_settings_v3'
-const LS_EVENTS = 'fc_events_v1'
+const LS_MYAGENDA = 'fc_my_agenda_v1'
+const LS_EVENTS   = 'fc_events_v1'
 
 function readMyAgendaOnly(): boolean {
   try {
-    const raw = localStorage.getItem(LS_SETTINGS)
+    const raw = localStorage.getItem(LS_MYAGENDA)
     const obj = raw ? JSON.parse(raw) : {}
-    return !!obj.myAgendaOnly
+    return !!obj.on
   } catch { return false }
 }
 
 function writeMyAgendaOnly(on: boolean) {
   try {
-    const raw = localStorage.getItem(LS_SETTINGS)
-    const obj = raw ? JSON.parse(raw) : {}
-    obj.myAgendaOnly = !!on
-    localStorage.setItem(LS_SETTINGS, JSON.stringify(obj))
+    localStorage.setItem(LS_MYAGENDA, JSON.stringify({ on: !!on }))
     try { window.dispatchEvent(new CustomEvent('fc:settings:changed')) } catch {}
   } catch {}
 }
@@ -29,8 +26,6 @@ function writeMyAgendaOnly(on: boolean) {
 function pokeEventsRefresh() {
   try {
     const v = localStorage.getItem(LS_EVENTS)
-    // Re-set to itself to notify any same-tab watchers that hook into setItem,
-    // and emit a custom event many apps listen to.
     localStorage.setItem(LS_EVENTS, v ?? '[]')
     try { window.dispatchEvent(new CustomEvent('fc:events:changed')) } catch {}
   } catch {}
@@ -39,7 +34,6 @@ function pokeEventsRefresh() {
 export default function MyAgendaSwitch() {
   const { currentUser } = useAuth()
 
-  // react to feature flag changes live
   const [enabled, setEnabled] = useState<boolean>(() => featureFlags.get().authEnabled)
   useEffect(() => {
     const unsub = featureFlags.subscribe(() => setEnabled(featureFlags.get().authEnabled))
@@ -69,7 +63,7 @@ export default function MyAgendaSwitch() {
             pokeEventsRefresh()
           }}
         />
-        <span>My agenda</span>
+      <span>My agenda</span>
       </label>
     </div>
   )
