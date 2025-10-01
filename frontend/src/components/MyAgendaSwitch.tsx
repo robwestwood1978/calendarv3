@@ -1,12 +1,12 @@
 // frontend/src/components/MyAgendaSwitch.tsx
-// Small floating switch (top-right under the account button).
-// Visible only when the accounts flag is ON and a user is signed in.
+// Floating "My agenda" toggle that also *refreshes* the events view immediately.
 
 import React, { useEffect, useState } from 'react'
 import { featureFlags } from '../state/featureFlags'
 import { useAuth } from '../auth/AuthProvider'
 
 const LS_SETTINGS = 'fc_settings_v3'
+const LS_EVENTS = 'fc_events_v1'
 
 function readMyAgendaOnly(): boolean {
   try {
@@ -26,10 +26,20 @@ function writeMyAgendaOnly(on: boolean) {
   } catch {}
 }
 
+function pokeEventsRefresh() {
+  try {
+    const v = localStorage.getItem(LS_EVENTS)
+    // Re-set to itself to notify any same-tab watchers that hook into setItem,
+    // and emit a custom event many apps listen to.
+    localStorage.setItem(LS_EVENTS, v ?? '[]')
+    try { window.dispatchEvent(new CustomEvent('fc:events:changed')) } catch {}
+  } catch {}
+}
+
 export default function MyAgendaSwitch() {
   const { currentUser } = useAuth()
 
-  // react to flag changes live
+  // react to feature flag changes live
   const [enabled, setEnabled] = useState<boolean>(() => featureFlags.get().authEnabled)
   useEffect(() => {
     const unsub = featureFlags.subscribe(() => setEnabled(featureFlags.get().authEnabled))
@@ -52,7 +62,12 @@ export default function MyAgendaSwitch() {
         <input
           type="checkbox"
           checked={on}
-          onChange={e => { writeMyAgendaOnly(e.currentTarget.checked); setOn(e.currentTarget.checked) }}
+          onChange={e => {
+            const next = e.currentTarget.checked
+            writeMyAgendaOnly(next)
+            setOn(next)
+            pokeEventsRefresh()
+          }}
         />
         <span>My agenda</span>
       </label>
