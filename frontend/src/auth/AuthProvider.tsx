@@ -1,5 +1,5 @@
 // frontend/src/auth/AuthProvider.tsx
-// Offline-first local auth with seed users. Now reacts when the feature flag flips ON.
+// Offline-first local auth with seed users. Emits an events refresh when link/unlink changes.
 
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react'
 import { featureFlags } from '../state/featureFlags'
@@ -30,6 +30,7 @@ const AuthContext = createContext<AuthCtx | null>(null)
 
 const LS_USERS = 'fc_users_v1'
 const LS_CURRENT = 'fc_current_user_v1'
+const LS_EVENTS = 'fc_events_v1'
 
 const seeds: Array<{ email: string; password: string; role: UserRole }> = [
   { email: 'parent@local.test', password: 'parent123', role: 'parent' },
@@ -65,6 +66,15 @@ function saveCurrentId(id: string | null) {
   if (id) localStorage.setItem(LS_CURRENT, id)
   else localStorage.removeItem(LS_CURRENT)
   try { window.dispatchEvent(new CustomEvent('fc:users:changed')) } catch {}
+}
+
+// Same-tab nudge so A/B readers re-parse events through our filtered getItem
+function pokeEventsRefresh() {
+  try {
+    const v = localStorage.getItem(LS_EVENTS)
+    localStorage.setItem(LS_EVENTS, v ?? '[]')
+    try { window.dispatchEvent(new CustomEvent('fc:events:changed')) } catch {}
+  } catch {}
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -116,30 +126,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (!u) return false
     saveCurrentId(u.id)
     setCurrentId(u.id)
+    // After sign-in, poke to ensure views reflect this user's links if toggle is ON
+    pokeEventsRefresh()
     return true
   }
   function signOut() {
     saveCurrentId(null)
     setCurrentId(null)
+    // After sign-out, poke so "My agenda" (if ON) shows nothing
+    pokeEventsRefresh()
   }
-
-// frontend/src/auth/AuthProvider.tsx
-// … (keep the rest of the file exactly as you have it) …
 
   function updateUser(u: User) {
     const next = loadUsers().map(x => x.id === u.id ? u : x)
     saveUsers(next)
     setUsers(next)
-    // NEW: nudge the UI to re-read events when links change
-    try { window.dispatchEvent(new CustomEvent('fc:events:changed')) } catch {}
-    try {
-      const v = localStorage.getItem('fc_events_v1')
-      localStorage.setItem('fc_events_v1', v ?? '[]')
-    } catch {}
+    // IMPORTANT: when link/unlink changes, nudge event consumers to re-evaluate
+    pokeEventsRefresh()
   }
-
-// … (rest unchanged)
-
 
   function linkMember(memberId: string) {
     if (!currentUser) return
