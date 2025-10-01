@@ -1,13 +1,15 @@
 // frontend/src/lib/agendaPatch.ts
-// Non-invasive "My agenda" filter for fc_events_v1 reads.
-// IMPORTANT: Reads toggle from its own key `fc_my_agenda_v1` (never edits fc_settings_v3).
+// Schema-agnostic "My agenda" filter for fc_events_v1 reads.
+// - Reads toggle from fc_my_agenda_v1 (never mutates fc_settings_v3).
+// - Matches linked members by ID OR name anywhere inside an event (deep scan, case-insensitive).
+// - If My agenda = ON and linkedMemberIds = [], returns [] (show nothing).
 
 const LS_EVENTS    = 'fc_events_v1'
-const LS_SETTINGS  = 'fc_settings_v3'     // read-only (for member name↔id map)
+const LS_SETTINGS  = 'fc_settings_v3'     // READ-ONLY (for members list)
 const LS_USERS     = 'fc_users_v1'
 const LS_CURRENT   = 'fc_current_user_v1'
 const LS_FLAGS     = 'fc_feature_flags_v1'
-const LS_MYAGENDA  = 'fc_my_agenda_v1'    // NEW: owns the toggle
+const LS_MYAGENDA  = 'fc_my_agenda_v1'
 
 type AnyRec = Record<string, any>
 
@@ -29,52 +31,76 @@ function getMyAgendaOnly(): boolean {
   return !!(v && v.on)
 }
 
-function getSettingsForMembers(): { members: Array<{id: string; name?: string}> } {
-  const s = safeParse<any>(localStorage.getItem(LS_SETTINGS)) || {}
-  const members = Array.isArray(s.members) ? s.members : []
-  return { members }
-}
-
 function getCurrentUser(): AnyRec | null {
   const id = localStorage.getItem(LS_CURRENT)
   const users = safeParse<any[]>(localStorage.getItem(LS_USERS)) || []
   return users.find(u => u.id === id) || null
 }
 
-function buildMemberIndex(members: Array<{id: string; name?: string}>) {
-  const idSet = new Set<string>()
-  const nameToId = new Map<string, string>()
-  for (const m of members || []) {
-    if (m?.id) idSet.add(m.id)
-    if (m?.name) nameToId.set(m.name, m.id)
-  }
-  return { idSet, nameToId }
+function getMembers(): Array<{ id: string; name?: string }> {
+  const s = safeParse<any>(localStorage.getItem(LS_SETTINGS)) || {}
+  return Array.isArray(s.members) ? s.members : []
 }
 
-function normalizeMemberIdsFromEvent(evt: AnyRec, index: { idSet: Set<string>, nameToId: Map<string,string> }): string[] {
-  const fields = ['attendeeIds','attendees','members','memberIds','who','whoIds','people','peopleIds','tags']
-  const out: string[] = []
-  const pushVal = (v: any) => {
-    if (v == null) return
-    if (Array.isArray(v)) return v.forEach(pushVal)
-    if (typeof v === 'string') {
-      const s = v.trim(); if (!s) return
-      if (index.idSet.has(s)) out.push(s)
-      else if (index.nameToId.has(s)) out.push(index.nameToId.get(s)!)
-    } else if (typeof v === 'object') {
-      const id = v.id || v.memberId
-      const name = v.name || v.label
-      if (id && index.idSet.has(id)) out.push(id)
-      else if (name && index.nameToId.has(name)) out.push(index.nameToId.get(name)!)
+/** Build lookups for matching */
+function buildMemberLookups(members: Array<{ id: string; name?: string }>, linkedIds: string[]) {
+  const linkedIdSet = new Set(linkedIds)
+  const idSet = new Set<string>()
+  const nameById = new Map<string, string>()
+  const canonicalNameById = new Map<string, string>() // lowercased, trimmed
+
+  for (const m of members) {
+    if (!m?.id) continue
+    idSet.add(m.id)
+    nameById.set(m.id, m.name || '')
+    canonicalNameById.set(m.id, (m.name || '').trim().toLowerCase())
+  }
+  const linkedNamesCanonical = linkedIds
+    .map(id => canonicalNameById.get(id) || '')
+    .filter(Boolean)
+
+  return { linkedIdSet, linkedNamesCanonical }
+}
+
+/** True if the event includes ANY of the linked members (by id or canonical name), anywhere */
+function eventMatchesLinked(evt: AnyRec, linkedIdSet: Set<string>, linkedNamesCanonical: string[]): boolean {
+  let found = false
+
+  const visit = (v: any) => {
+    if (found || v == null) return
+    const t = typeof v
+    if (t === 'string' || t === 'number' || t === 'boolean') {
+      const s = String(v).trim()
+      if (!s) return
+      // ID match (exact)
+      if (linkedIdSet.has(s)) { found = true; return }
+      // Name match (case-insensitive, token-aware)
+      const sc = s.toLowerCase()
+      for (const name of linkedNamesCanonical) {
+        if (!name) continue
+        // require word boundary around the name to reduce false positives
+        // e.g., "Rob" matches "Rob", "Rob Taylor", "Parent: Rob" but not "Robotics"
+        const re = new RegExp(`(^|\\b|\\s)${escapeRegExp(name)}(\\b|\\s|$)`)
+        if (re.test(sc)) { found = true; return }
+      }
+      return
+    }
+    if (Array.isArray(v)) {
+      for (const x of v) { visit(x); if (found) return }
+      return
+    }
+    if (t === 'object') {
+      for (const k in v) { visit(v[k]); if (found) return }
+      return
     }
   }
-  for (const f of fields) pushVal(evt?.[f])
-  pushVal(evt?.responsibleId)
-  pushVal(evt?.responsibleMemberId)
-  pushVal(evt?.responsible)
-  pushVal(evt?.ownerMemberId)
-  pushVal(evt?.owner)
-  return Array.from(new Set(out))
+
+  visit(evt)
+  return found
+}
+
+function escapeRegExp(s: string) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 function filterEventsJSON(origJSON: string): string {
@@ -88,24 +114,16 @@ function filterEventsJSON(origJSON: string): string {
   if (!user) return origJSON
 
   const linked: string[] = Array.isArray(user.linkedMemberIds) ? user.linkedMemberIds : []
-
   // With My agenda ON and no linked members -> show NONE
   if (linked.length === 0) return '[]'
 
-  const { members } = getSettingsForMembers()
-  const index = buildMemberIndex(members)
+  const lookups = buildMemberLookups(getMembers(), linked)
 
-  const keep = (evt: AnyRec) => {
-    const ids = normalizeMemberIdsFromEvent(evt, index)
-    if (ids.length === 0) return false
-    return ids.some(id => linked.includes(id))
-  }
-
-  const filtered = arr.filter(keep)
+  const filtered = arr.filter(evt => eventMatchesLinked(evt, lookups.linkedIdSet, lookups.linkedNamesCanonical))
   try { return JSON.stringify(filtered) } catch { return origJSON }
 }
 
-// Install once
+// Install once & early
 if (!window.__fcOrigGetItem) {
   window.__fcOrigGetItem = localStorage.getItem.bind(localStorage)
   const orig = window.__fcOrigGetItem
