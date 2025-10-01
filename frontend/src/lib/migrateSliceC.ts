@@ -1,54 +1,28 @@
 // frontend/src/lib/migrateSliceC.ts
-// Idempotent, storage-only preflight for Slice C.
-// Safe for minifiers: no chained IIFEs; explicit function calls with semicolons.
+// Slice C preflight: DO NOT TOUCH fc_settings_v3.
+// Only ensure fc_events_v1 is an array so A/B code stays safe.
 
-const LS_SETTINGS = 'fc_settings_v3'
 const LS_EVENTS = 'fc_events_v1'
 
-type AnyRec = Record<string, any>
+function safeParse<T = any>(raw: string | null): T | null {
+  if (!raw) return null
+  try { return JSON.parse(raw) as T } catch { return null }
+}
 
-function readJSON<T = any>(key: string): T | null {
+function ensureEventsArray() {
   try {
-    const raw = localStorage.getItem(key)
-    return raw ? (JSON.parse(raw) as T) : null
+    const prev = safeParse<any[]>(localStorage.getItem(LS_EVENTS))
+    if (Array.isArray(prev)) return
+    // If missing or malformed, set to empty array (A/B-safe)
+    localStorage.setItem(LS_EVENTS, '[]')
   } catch {
-    return null
-  }
-}
-
-function writeJSON(key: string, value: any): void {
-  try {
-    localStorage.setItem(key, JSON.stringify(value))
-  } catch {}
-}
-
-function migrateSettings(): void {
-  const prev = readJSON<AnyRec>(LS_SETTINGS) || {}
-  const next: AnyRec = { ...prev }
-
-  if (!Array.isArray(next.members)) next.members = []
-  if (typeof next.myAgendaOnly !== 'boolean') next.myAgendaOnly = false
-
-  if (JSON.stringify(prev) !== JSON.stringify(next)) {
-    writeJSON(LS_SETTINGS, next)
-  }
-}
-
-function migrateEvents(): void {
-  const prev = readJSON<any[]>(LS_EVENTS)
-  if (!Array.isArray(prev)) {
-    writeJSON(LS_EVENTS, prev == null ? [] : (Array.isArray(prev) ? prev : []))
+    // fail silent
   }
 }
 
 export function runMigrateSliceC(): void {
-  try {
-    migrateSettings()
-    migrateEvents()
-  } catch {}
-  try {
-    window.dispatchEvent(new CustomEvent('fc:preflight:done'))
-  } catch {}
+  ensureEventsArray()
+  try { window.dispatchEvent(new CustomEvent('fc:preflight:done')) } catch {}
 }
 
 // Execute on import (side effect)
