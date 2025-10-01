@@ -1,7 +1,7 @@
 // frontend/src/pages/Home.tsx
 import React, { useMemo, useState } from 'react'
 import { DateTime } from 'luxon'
-import { listExpanded } from '../state/events'
+import { listExpanded } from '../state/events-agenda'
 import type { EventRecord } from '../lib/recurrence'
 import { useSettings, fmt } from '../state/settings'
 import { Link, useNavigate } from 'react-router-dom'
