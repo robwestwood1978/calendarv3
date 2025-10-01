@@ -1,7 +1,7 @@
 // frontend/src/components/EventGrid.tsx
 import React, { useState } from 'react'
 import { DateTime } from 'luxon'
-import { listExpanded } from '../state/events'
+import { listExpanded } from '../state/events-agenda'
 import type { EventRecord } from '../lib/recurrence'
 import { useSettings, pickEventColour } from '../state/settings'
 
