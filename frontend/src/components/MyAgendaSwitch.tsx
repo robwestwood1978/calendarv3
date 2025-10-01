@@ -1,5 +1,6 @@
 // frontend/src/components/MyAgendaSwitch.tsx
-// Floating "My agenda" toggle that stores state in fc_my_agenda_v1 (never touches fc_settings_v3).
+// Floating "My agenda" toggle that stores state in fc_my_agenda_v1 (never touches fc_settings_v3)
+// and *immediately* nudges the Calendar/Home to re-read events via a safe localStorage poke.
 
 import React, { useEffect, useState } from 'react'
 import { featureFlags } from '../state/featureFlags'
@@ -23,6 +24,8 @@ function writeMyAgendaOnly(on: boolean) {
   } catch {}
 }
 
+// Nudge any A/B components that re-read events only when fc_events_v1 changes.
+// Re-setting the same value is harmless and forces a same-tab update path that A/B already uses.
 function pokeEventsRefresh() {
   try {
     const v = localStorage.getItem(LS_EVENTS)
@@ -34,12 +37,14 @@ function pokeEventsRefresh() {
 export default function MyAgendaSwitch() {
   const { currentUser } = useAuth()
 
+  // react to feature flag changes live
   const [enabled, setEnabled] = useState<boolean>(() => featureFlags.get().authEnabled)
   useEffect(() => {
     const unsub = featureFlags.subscribe(() => setEnabled(featureFlags.get().authEnabled))
     return () => unsub()
   }, [])
 
+  // local state mirrors the stored toggle
   const [on, setOn] = useState<boolean>(() => readMyAgendaOnly())
   useEffect(() => {
     const h = () => setOn(readMyAgendaOnly())
@@ -52,7 +57,7 @@ export default function MyAgendaSwitch() {
 
   return (
     <div style={root}>
-      <label style={pill}>
+      <label style={pill} title="Show only events for my linked members">
         <input
           type="checkbox"
           checked={on}
@@ -60,10 +65,10 @@ export default function MyAgendaSwitch() {
             const next = e.currentTarget.checked
             writeMyAgendaOnly(next)
             setOn(next)
-            pokeEventsRefresh()
+            pokeEventsRefresh() // <- the important nudge
           }}
         />
-      <span>My agenda</span>
+        <span>My agenda</span>
       </label>
     </div>
   )
