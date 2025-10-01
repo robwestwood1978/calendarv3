@@ -1,19 +1,18 @@
 // frontend/src/lib/agendaPatch.ts
 // Non-invasive "My agenda" filter for fc_events_v1 reads.
-// Now handles empty linked members (-> show none), broader membership fields, and name→ID mapping.
+// IMPORTANT: Reads toggle from its own key `fc_my_agenda_v1` (never edits fc_settings_v3).
 
-const LS_EVENTS   = 'fc_events_v1'
-const LS_SETTINGS = 'fc_settings_v3'
-const LS_USERS    = 'fc_users_v1'
-const LS_CURRENT  = 'fc_current_user_v1'
-const LS_FLAGS    = 'fc_feature_flags_v1'
+const LS_EVENTS    = 'fc_events_v1'
+const LS_SETTINGS  = 'fc_settings_v3'     // read-only (for member name↔id map)
+const LS_USERS     = 'fc_users_v1'
+const LS_CURRENT   = 'fc_current_user_v1'
+const LS_FLAGS     = 'fc_feature_flags_v1'
+const LS_MYAGENDA  = 'fc_my_agenda_v1'    // NEW: owns the toggle
 
 type AnyRec = Record<string, any>
 
 declare global {
-  interface Window {
-    __fcOrigGetItem?: Storage['getItem']
-  }
+  interface Window { __fcOrigGetItem?: Storage['getItem'] }
 }
 
 function safeParse<T = any>(raw: string | null): T | null {
@@ -25,54 +24,21 @@ function getFlags(): { authEnabled?: boolean } {
   return safeParse(localStorage.getItem(LS_FLAGS)) || { authEnabled: false }
 }
 
-function getSettings(): { members: Array<{id: string; name?: string}>; myAgendaOnly: boolean } {
+function getMyAgendaOnly(): boolean {
+  const v = safeParse<{ on?: boolean }>(localStorage.getItem(LS_MYAGENDA))
+  return !!(v && v.on)
+}
+
+function getSettingsForMembers(): { members: Array<{id: string; name?: string}> } {
   const s = safeParse<any>(localStorage.getItem(LS_SETTINGS)) || {}
   const members = Array.isArray(s.members) ? s.members : []
-  const myAgendaOnly = !!s.myAgendaOnly
-  return { members, myAgendaOnly }
+  return { members }
 }
 
 function getCurrentUser(): AnyRec | null {
   const id = localStorage.getItem(LS_CURRENT)
   const users = safeParse<any[]>(localStorage.getItem(LS_USERS)) || []
   return users.find(u => u.id === id) || null
-}
-
-function normalizeMemberIdsFromEvent(evt: AnyRec, memberIndex: { idSet: Set<string>, nameToId: Map<string,string> }): string[] {
-  const fields = [
-    'attendeeIds','attendees','members','memberIds','who','whoIds','people','peopleIds','tags'
-  ]
-  const out: string[] = []
-
-  const pushVal = (v: any) => {
-    if (!v && v !== 0) return
-    if (typeof v === 'string') {
-      const s = v.trim()
-      if (!s) return
-      if (memberIndex.idSet.has(s)) out.push(s)
-      else if (memberIndex.nameToId.has(s)) out.push(memberIndex.nameToId.get(s)!)
-    } else if (typeof v === 'object') {
-      // objects like { id: 'm_...' , name: 'Rob' }
-      const id = (v && (v.id || v.memberId)) as string | undefined
-      const name = (v && (v.name || v.label)) as string | undefined
-      if (id && memberIndex.idSet.has(id)) out.push(id)
-      else if (name && memberIndex.nameToId.has(name)) out.push(memberIndex.nameToId.get(name)!)
-    } else if (Array.isArray(v)) {
-      v.forEach(pushVal)
-    }
-  }
-
-  for (const f of fields) pushVal(evt?.[f])
-
-  // responsible/owner (could be id or name)
-  pushVal(evt?.responsibleId)
-  pushVal(evt?.responsibleMemberId)
-  pushVal(evt?.responsible)
-  pushVal(evt?.ownerMemberId)
-  pushVal(evt?.owner)
-
-  // unique
-  return Array.from(new Set(out))
 }
 
 function buildMemberIndex(members: Array<{id: string; name?: string}>) {
@@ -85,33 +51,54 @@ function buildMemberIndex(members: Array<{id: string; name?: string}>) {
   return { idSet, nameToId }
 }
 
+function normalizeMemberIdsFromEvent(evt: AnyRec, index: { idSet: Set<string>, nameToId: Map<string,string> }): string[] {
+  const fields = ['attendeeIds','attendees','members','memberIds','who','whoIds','people','peopleIds','tags']
+  const out: string[] = []
+  const pushVal = (v: any) => {
+    if (v == null) return
+    if (Array.isArray(v)) return v.forEach(pushVal)
+    if (typeof v === 'string') {
+      const s = v.trim(); if (!s) return
+      if (index.idSet.has(s)) out.push(s)
+      else if (index.nameToId.has(s)) out.push(index.nameToId.get(s)!)
+    } else if (typeof v === 'object') {
+      const id = v.id || v.memberId
+      const name = v.name || v.label
+      if (id && index.idSet.has(id)) out.push(id)
+      else if (name && index.nameToId.has(name)) out.push(index.nameToId.get(name)!)
+    }
+  }
+  for (const f of fields) pushVal(evt?.[f])
+  pushVal(evt?.responsibleId)
+  pushVal(evt?.responsibleMemberId)
+  pushVal(evt?.responsible)
+  pushVal(evt?.ownerMemberId)
+  pushVal(evt?.owner)
+  return Array.from(new Set(out))
+}
+
 function filterEventsJSON(origJSON: string): string {
   const arr = safeParse<any[]>(origJSON)
   if (!Array.isArray(arr)) return origJSON
 
-  const flags = getFlags()
-  if (!flags.authEnabled) return origJSON
-
-  const { members, myAgendaOnly } = getSettings()
-  if (!myAgendaOnly) return origJSON
+  if (!getFlags().authEnabled) return origJSON
+  if (!getMyAgendaOnly()) return origJSON
 
   const user = getCurrentUser()
   if (!user) return origJSON
 
   const linked: string[] = Array.isArray(user.linkedMemberIds) ? user.linkedMemberIds : []
 
-  // IMPORTANT CHANGE: if My agenda is ON but user has no linked members → show NONE
-  if (linked.length === 0) {
-    try { return JSON.stringify([]) } catch { return '[]' }
-  }
+  // With My agenda ON and no linked members -> show NONE
+  if (linked.length === 0) return '[]'
 
+  const { members } = getSettingsForMembers()
   const index = buildMemberIndex(members)
 
   const keep = (evt: AnyRec) => {
     const ids = normalizeMemberIdsFromEvent(evt, index)
     if (ids.length === 0) return false
-    for (const id of ids) if (linked.includes(id)) return true
-    return false
+    return ids.some(id => linked.includes(id))
   }
 
   const filtered = arr.filter(keep)
