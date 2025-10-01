@@ -123,11 +123,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setCurrentId(null)
   }
 
+// frontend/src/auth/AuthProvider.tsx
+// … (keep the rest of the file exactly as you have it) …
+
   function updateUser(u: User) {
     const next = loadUsers().map(x => x.id === u.id ? u : x)
     saveUsers(next)
     setUsers(next)
+    // NEW: nudge the UI to re-read events when links change
+    try { window.dispatchEvent(new CustomEvent('fc:events:changed')) } catch {}
+    try {
+      const v = localStorage.getItem('fc_events_v1')
+      localStorage.setItem('fc_events_v1', v ?? '[]')
+    } catch {}
   }
+
+// … (rest unchanged)
+
 
   function linkMember(memberId: string) {
     if (!currentUser) return
