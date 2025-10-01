@@ -3,7 +3,7 @@ import React, { useEffect, useMemo, useState } from 'react'
 import { DateTime } from 'luxon'
 import EventModal from '../components/EventModal'
 import { TimeGrid, MonthGrid } from '../components/EventGrid'
-import { upsertEvent, deleteEvent } from '../state/events'
+import { upsertEvent, deleteEvent } from '../state/events-agenda'
 import type { EventRecord } from '../lib/recurrence'
 
 type View = 'day' | '3day' | 'week' | 'month'
