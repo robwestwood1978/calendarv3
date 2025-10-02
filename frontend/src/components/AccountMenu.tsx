@@ -1,105 +1,82 @@
 // frontend/src/components/AccountMenu.tsx
-// Shows a small account button (top-right) when the auth feature flag is ON.
-// Subscribes to the flag so it appears/disappears immediately on toggle.
-
-import React, { useEffect, useRef, useState } from 'react'
-import { featureFlags } from '../state/featureFlags'
+import React from 'react'
 import { useAuth } from '../auth/AuthProvider'
+
+function roleLabel(r?: string) {
+  if (r === 'parent') return 'Parent'
+  if (r === 'adult') return 'Adult'
+  if (r === 'child') return 'Child'
+  return '—'
+}
+function initial(s: string) {
+  const t = s.trim()
+  if (!t) return '•'
+  const ch = t[0].toUpperCase()
+  return /[A-Z0-9]/.test(ch) ? ch : '•'
+}
 
 export default function AccountMenu() {
   const { currentUser, signIn, signOut } = useAuth()
+  const [open, setOpen] = React.useState(false)
+  const ref = React.useRef<HTMLDivElement>(null)
 
-  // React to feature flag changes live
-  const [enabled, setEnabled] = useState<boolean>(() => featureFlags.get().authEnabled)
-  useEffect(() => {
-    const unsub = featureFlags.subscribe(() => setEnabled(featureFlags.get().authEnabled))
-    return () => unsub()
+  React.useEffect(() => {
+    const onDoc = (e: MouseEvent) => { if (!ref.current) return; if (!ref.current.contains(e.target as any)) setOpen(false) }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
   }, [])
-
-  // If experiments are OFF, render nothing (keeps A/B identical)
-  if (!enabled) return null
-
-  const [open, setOpen] = useState(false)
-  const [email, setEmail] = useState('parent@local.test')
-  const [password, setPassword] = useState('parent123')
-  const [error, setError] = useState<string | null>(null)
-
-  // close on outside click
-  const boxRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (!boxRef.current) return
-      if (!boxRef.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [])
-
-  async function doSignIn(e: React.FormEvent) {
-    e.preventDefault()
-    setError(null)
-    const ok = await signIn(email, password)
-    if (!ok) { setError('Sign in failed. Check your email and password.'); return }
-    setOpen(false)
-  }
-
-  const initial = currentUser ? currentUser.email.charAt(0).toUpperCase() : '↪'
 
   return (
-    <div style={styles.root}>
-      <button aria-label="Account" style={styles.btn} onClick={() => setOpen(v => !v)}>
-        {initial}
+    <div ref={ref} className="account-menu" style={{ position: 'relative' }}>
+      <button
+        className="icon-btn"
+        aria-label="Account"
+        title={currentUser ? `${currentUser.email} (${roleLabel(currentUser.role)})` : 'Sign in'}
+        onClick={() => setOpen(v => !v)}
+        style={{
+          width: 32, height: 32, borderRadius: '50%',
+          display: 'grid', placeItems: 'center',
+          border: '1px solid var(--border)', background: 'var(--surface)',
+        }}
+      >
+        <span style={{ fontWeight: 600, fontSize: 14 }}>
+          {currentUser ? initial(currentUser.email) : '↪'}
+        </span>
       </button>
+
       {open && (
-        <div ref={boxRef} style={styles.pop}>
-          {!currentUser ? (
-            <form onSubmit={doSignIn} style={{ display: 'grid', gap: 8 }}>
-              <strong>Sign in</strong>
-              <input
-                type="email"
-                placeholder="email"
-                value={email}
-                onChange={e => setEmail(e.target.value)}
-                autoFocus
-              />
-              <input
-                type="password"
-                placeholder="password"
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-              />
-              {error && <div style={styles.err}>{error}</div>}
-              <button type="submit" className="primary">Sign in</button>
-              <p style={styles.hint}>
-                Seed users: parent@local.test / <code>parent123</code>,
-                adult@local.test / <code>adult123</code>,
-                child@local.test / <code>child123</code>.
-              </p>
-            </form>
+        <div
+          role="menu"
+          style={{
+            position: 'absolute', right: 0, top: 40, minWidth: 220,
+            background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 10,
+            boxShadow: '0 10px 30px rgba(0,0,0,.12)', padding: 8, zIndex: 50,
+          }}
+        >
+          {currentUser ? (
+            <>
+              <div style={{ padding: '6px 8px', fontSize: 12, color: 'var(--muted)' }}>
+                Signed in as <strong>{currentUser.email}</strong><br />
+                Role: <strong>{roleLabel(currentUser.role)}</strong>
+              </div>
+              <div style={{ height: 8 }} />
+              <button className="ghost" onClick={() => { setOpen(false); signOut() }} style={{ width: '100%' }}>
+                Sign out
+              </button>
+            </>
           ) : (
-            <div style={{ display: 'grid', gap: 8 }}>
-              <div><strong>{currentUser.email}</strong></div>
-              <div>Role: {currentUser.role}</div>
-              <button onClick={() => { signOut(); setOpen(false) }}>Sign out</button>
-            </div>
+            <>
+              <div style={{ padding: '6px 8px', fontSize: 12, color: 'var(--muted)' }}>
+                Not signed in
+              </div>
+              <div style={{ height: 8 }} />
+              <button className="primary" onClick={() => { setOpen(false); signIn() }} style={{ width: '100%' }}>
+                Sign in
+              </button>
+            </>
           )}
         </div>
       )}
     </div>
   )
-}
-
-const styles: Record<string, React.CSSProperties> = {
-  root: { position: 'fixed', top: 8, right: 8, zIndex: 50 },
-  btn: {
-    width: 36, height: 36, borderRadius: 18, border: '1px solid #cbd5e1', background: 'white',
-    fontWeight: 700, cursor: 'pointer',
-  },
-  pop: {
-    position: 'absolute', right: 0, marginTop: 8, padding: 12,
-    width: 280, background: 'white', border: '1px solid #e2e8f0', borderRadius: 8,
-    boxShadow: '0 10px 25px rgba(0,0,0,.08)',
-  },
-  hint: { color: '#64748b', fontSize: 12, margin: 0 },
-  err: { color: '#b91c1c', fontSize: 12 },
 }
