@@ -8,21 +8,16 @@ if (typeof window !== 'undefined') {
       localStorage.removeItem('fc_settings_v1')
       localStorage.removeItem('fc_settings_v2')
       localStorage.removeItem('fc_settings_v3') // current
-      localStorage.removeItem('fc_feature_flags_v1')
       localStorage.removeItem('fc_users_v1')
       localStorage.removeItem('fc_current_user_v1')
+      localStorage.removeItem('fc_my_agenda_v1')
+      localStorage.removeItem('fc_feature_flags_v1')
       alert('Local data cleared. Reloading…')
     } catch {}
     url.searchParams.delete('reset')
     window.location.replace(url.toString())
   }
 }
-
-// Slice C preflight (safe, idempotent; shapes only)
-import './lib/migrateSliceC'
-// Slice C runtime patches (safe when flag is OFF)
-import './lib/agendaPatch'
-import './lib/permissionsPatch'
 
 import React from 'react'
 import { createRoot } from 'react-dom/client'
@@ -35,18 +30,22 @@ import Chores from './pages/Chores'
 import Meals from './pages/Meals'
 import Settings from './pages/Settings'
 import { SettingsProvider } from './state/settings'
-import { AuthProvider } from './auth/AuthProvider'
-import AccountMenu from './components/AccountMenu'
-import MyAgendaSwitch from './components/MyAgendaSwitch'
+import AgendaRefreshBridge from './components/AgendaRefreshBridge'
 import './styles.css'
 
-const root = document.getElementById('root')!
-createRoot(root).render(
-  <React.StrictMode>
-    <SettingsProvider>
-      <AuthProvider>
+function RootApp() {
+  // “Pulse” causes the routed subtree to remount whenever auth/agenda/flags change.
+  const [pulse, setPulse] = React.useState(0)
+
+  return (
+    <React.StrictMode>
+      <SettingsProvider>
         <BrowserRouter>
-          <Routes>
+          {/* Invisible: listens for account/link/toggle/flag changes */}
+          <AgendaRefreshBridge onPulse={() => setPulse(p => (p + 1) % 1_000_000)} />
+
+          <Routes key={pulse}>
+            {/* Remount AppLayout + children when pulse changes */}
             <Route element={<AppLayout />}>
               <Route index element={<Home />} />
               <Route path="calendar" element={<Calendar />} />
@@ -57,11 +56,10 @@ createRoot(root).render(
             </Route>
           </Routes>
         </BrowserRouter>
+      </SettingsProvider>
+    </React.StrictMode>
+  )
+}
 
-        {/* Slice C overlays (render nothing when flag OFF) */}
-        <AccountMenu />
-        <MyAgendaSwitch />
-      </AuthProvider>
-    </SettingsProvider>
-  </React.StrictMode>
-)
+const root = document.getElementById('root')!
+createRoot(root).render(<RootApp />)
