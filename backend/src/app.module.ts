@@ -1,17 +1,17 @@
 import { Module } from '@nestjs/common';
 
-// Keep your existing AppController
+// Keep your existing controller(s)
 import { AppController } from './app.controller';
 
-// ⬇️ Add these two new controllers (make sure these files exist)
+// Add these two small controllers
 import { HealthController } from './health.controller';
 import { IntegrationsController } from './integrations.controller';
 
 @Module({
   controllers: [
     AppController,         // existing
-    HealthController,      // new: /api/health
-    IntegrationsController // new: /api/fetch-ics?url=...
+    HealthController,      // new: GET /api/health
+    IntegrationsController // new: GET /api/fetch-ics?url=...
   ],
   providers: [],
 })
