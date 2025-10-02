@@ -33,6 +33,10 @@ import { SettingsProvider } from './state/settings'
 import AgendaRefreshBridge from './components/AgendaRefreshBridge'
 import './styles.css'
 
+// ⬅️ NEW: import and run the Slice C migrator
+import { migrateSliceC } from './lib/migrateSliceC' // ⬅️ NEW
+migrateSliceC()                                       // ⬅️ NEW
+
 function RootApp() {
   // “Pulse” causes the routed subtree to remount whenever auth/agenda/flags change.
   const [pulse, setPulse] = React.useState(0)
