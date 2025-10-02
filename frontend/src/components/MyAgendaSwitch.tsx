@@ -3,8 +3,10 @@ import React from 'react'
 const KEY = 'fc_my_agenda_v1'
 
 function readState(): boolean {
-  try { return !!JSON.parse(localStorage.getItem(KEY) || '{}').on }
-  catch { return false }
+  try {
+    const v = JSON.parse(localStorage.getItem(KEY) || 'false')
+    return typeof v === 'boolean' ? v : !!v?.on
+  } catch { return false }
 }
 function writeState(on: boolean) {
   localStorage.setItem(KEY, JSON.stringify({ on }))
