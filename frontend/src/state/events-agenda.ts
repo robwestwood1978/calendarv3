@@ -1,16 +1,14 @@
 // frontend/src/state/events-agenda.ts
-// Slice C decorator for events (final):
-// - Filters READS by linked member *names* (attendees/responsibleAdult) when auth + My Agenda are ON.
-// - Guards WRITES with roles: parent=full, adult=linked-only, child=read-only.
-// - Emits "fc:events:changed" so Home/Calendar refresh immediately.
-// - Uses toast notifications (window 'toast' CustomEvent) for blocked actions.
-// - Never mutates fc_settings_v3. Idempotent and fully behind the feature flag.
+// Slice C+D decorator for events:
+// - Preserves Slice C logic: filtering by linked member *names* and role-based guards.
+// - Adds Slice D: overlays external events from integrations (Apple/ICS/etc.).
+// - External calendars can be explicitly mapped to members; those events appear in My Agenda.
 
 import * as base from './events'
 import type { DateTime } from 'luxon'
 import type { EventRecord } from '../lib/recurrence'
 
-// LocalStorage keys
+// ---- LocalStorage keys ----
 const LS_FLAGS     = 'fc_feature_flags_v1'
 const LS_USERS     = 'fc_users_v1'
 const LS_CURRENT   = 'fc_current_user_v1'
@@ -18,9 +16,11 @@ const LS_SETTINGS  = 'fc_settings_v3'
 const LS_MYAGENDA  = 'fc_my_agenda_v1'
 const LS_EVENTS    = 'fc_events_v1'
 
+// ---- Types ----
 type UserRole = 'parent' | 'adult' | 'child'
 type AnyRec = Record<string, any>
 
+// ---- Helpers ----
 function safeParse<T = any>(raw: string | null): T | null {
   if (!raw) return null
   try { return JSON.parse(raw) as T } catch { return null }
@@ -43,7 +43,7 @@ function currentUser(): null | { id: string; role: UserRole; linkedMemberIds: st
   return { id: u.id, role: u.role as UserRole, linkedMemberIds: Array.isArray(u.linkedMemberIds) ? u.linkedMemberIds : [] }
 }
 
-// Resolve ID→name using multiple shapes; fall back to using given values as names.
+// Resolve linked member IDs to names (for legacy/local events)
 function linkedNameCandidates(): string[] {
   const u = currentUser()
   if (!u) return []
@@ -51,7 +51,6 @@ function linkedNameCandidates(): string[] {
   const s = safeParse<any>(localStorage.getItem(LS_SETTINGS)) || {}
   const out: string[] = []
 
-  // Shape A: settings.members: Array<{id,name}>
   if (Array.isArray(s.members)) {
     const byId = new Map<string, string>()
     for (const m of s.members) {
@@ -64,7 +63,6 @@ function linkedNameCandidates(): string[] {
     if (out.length) return out
   }
 
-  // Shape B: settings.memberLookup: { [id]: name }
   if (s && s.memberLookup && typeof s.memberLookup === 'object') {
     for (const id of ids) {
       const name = String(s.memberLookup[id] || '').trim()
@@ -73,7 +71,6 @@ function linkedNameCandidates(): string[] {
     if (out.length) return out
   }
 
-  // Fallback: treat the IDs themselves as names (supports early/demo data)
   return ids.map(v => String(v || '').trim()).filter(Boolean)
 }
 
@@ -93,22 +90,47 @@ function evtInvolvesNames(evt: AnyRec, names: string[]): boolean {
 function emitChanged() { try { window.dispatchEvent(new CustomEvent('fc:events:changed')) } catch {} }
 function toast(msg: string) { try { window.dispatchEvent(new CustomEvent('toast', { detail: msg })) } catch {} }
 
-// ---------- FILTERED READS (signature EXACT match to baseline) ----------
-export function listExpanded(from: DateTime, to: DateTime, query: string): EventRecord[] {
-  const expanded = base.listExpanded(from, to, query)
+// ---- External overlays (Slice D) ----
+import { externalExpanded, listCalendars } from './integrations'
 
-  if (!featureAuthEnabled()) return expanded
-  if (!myAgendaOn()) return expanded
+// ---------- FILTERED READS ----------
+export function listExpanded(from: DateTime, to: DateTime, query: string): EventRecord[] {
+  const local = base.listExpanded(from, to, query)
+  let ext: EventRecord[] = []
+  try { ext = externalExpanded(from, to, query) } catch { ext = [] }
+
+  let merged = [...local, ...ext]
+
+  if (!featureAuthEnabled()) return merged
+  if (!myAgendaOn()) return merged
+
   const u = currentUser()
-  if (!u) return expanded
+  if (!u) return merged
+  const linkedIds = new Set<string>((u.linkedMemberIds || []) as string[])
 
   const names = linkedNameCandidates()
-  if (names.length === 0) return []
+  const localsFiltered = merged.filter(evt => evtInvolvesNames(evt, names))
 
-  return expanded.filter(evt => evtInvolvesNames(evt, names))
+  // External: include if calendar is mapped to a linked member
+  const extCalMap = new Map(listCalendars().map(c => [c.id, new Set(c.assignedMemberIds || [])]))
+  const externalsMapped = merged.filter(evt => {
+    const id = (evt as any)._calendarId as string | undefined
+    if (!id) return false
+    const set = extCalMap.get(id); if (!set) return false
+    for (const m of set) if (linkedIds.has(m)) return true
+    return false
+  })
+
+  const out: EventRecord[] = []
+  const seen = new Set<string>()
+  for (const e of [...localsFiltered, ...externalsMapped]) {
+    if (seen.has(e.id)) continue
+    seen.add(e.id); out.push(e)
+  }
+  return out
 }
 
-// re-export other read helpers unchanged
+// Re-export read helpers
 export const list      = (base as any).list      as typeof base.list
 export const listRange = (base as any).listRange as typeof base.listRange
 
@@ -158,11 +180,12 @@ export function deleteEvent(id: string): void {
 // Re-export everything else unchanged
 export * from './events'
 
-// Reactive bridge so views refresh without manual reloads
+// Reactive bridge
 ;(function bridge() {
   const fire = () => emitChanged()
   window.addEventListener('fc:users:changed', fire)
   window.addEventListener('fc:settings:changed', fire)
+  window.addEventListener('fc:integrations:changed', fire)
   window.addEventListener('storage', (e) => {
     if (!e) return
     if (e.key === LS_USERS || e.key === LS_CURRENT || e.key === LS_MYAGENDA || e.key === LS_FLAGS) fire()
