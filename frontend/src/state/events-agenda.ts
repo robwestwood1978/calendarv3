@@ -1,6 +1,10 @@
 // frontend/src/state/events-agenda.ts
-// Slice C decorator for events: filters reads by linked *names* and guards writes.
-// Robust against missing settings.members. No writes to fc_settings_v3.
+// Slice C decorator for events (final):
+// - Filters READS by linked member *names* (attendees/responsibleAdult) when auth + My Agenda are ON.
+// - Guards WRITES with roles: parent=full, adult=linked-only, child=read-only.
+// - Emits "fc:events:changed" so Home/Calendar refresh immediately.
+// - Uses toast notifications (window 'toast' CustomEvent) for blocked actions.
+// - Never mutates fc_settings_v3. Idempotent and fully behind the feature flag.
 
 import * as base from './events'
 import type { DateTime } from 'luxon'
@@ -14,23 +18,23 @@ const LS_SETTINGS  = 'fc_settings_v3'
 const LS_MYAGENDA  = 'fc_my_agenda_v1'
 const LS_EVENTS    = 'fc_events_v1'
 
-type AnyRec = Record<string, any>
 type UserRole = 'parent' | 'adult' | 'child'
+type AnyRec = Record<string, any>
 
 function safeParse<T = any>(raw: string | null): T | null {
   if (!raw) return null
   try { return JSON.parse(raw) as T } catch { return null }
 }
 
-function isAuthEnabled(): boolean {
+function featureAuthEnabled(): boolean {
   const f = safeParse<{ authEnabled?: boolean }>(localStorage.getItem(LS_FLAGS))
   return !!(f && f.authEnabled)
 }
-function isMyAgendaOn(): boolean {
+function myAgendaOn(): boolean {
   const v = safeParse<{ on?: boolean }>(localStorage.getItem(LS_MYAGENDA))
   return !!(v && v.on)
 }
-function getCurrentUser(): null | { id: string; role: UserRole; linkedMemberIds: string[] } {
+function currentUser(): null | { id: string; role: UserRole; linkedMemberIds: string[] } {
   const id = localStorage.getItem(LS_CURRENT)
   if (!id) return null
   const users = safeParse<any[]>(localStorage.getItem(LS_USERS)) || []
@@ -39,9 +43,11 @@ function getCurrentUser(): null | { id: string; role: UserRole; linkedMemberIds:
   return { id: u.id, role: u.role as UserRole, linkedMemberIds: Array.isArray(u.linkedMemberIds) ? u.linkedMemberIds : [] }
 }
 
-// Resolve ID→name using multiple shapes; return [] if nothing resolvable
-function resolveNamesFromSettings(ids: string[]): string[] {
-  if (ids.length === 0) return []
+// Resolve ID→name using multiple shapes; fall back to using given values as names.
+function linkedNameCandidates(): string[] {
+  const u = currentUser()
+  if (!u) return []
+  const ids = Array.isArray(u.linkedMemberIds) ? u.linkedMemberIds : []
   const s = safeParse<any>(localStorage.getItem(LS_SETTINGS)) || {}
   const out: string[] = []
 
@@ -67,105 +73,94 @@ function resolveNamesFromSettings(ids: string[]): string[] {
     if (out.length) return out
   }
 
-  return out
+  // Fallback: treat the IDs themselves as names (supports early/demo data)
+  return ids.map(v => String(v || '').trim()).filter(Boolean)
 }
 
-// Build candidate names for matching. If we can’t resolve IDs to names,
-// fall back to treating the ids themselves as names (keeps legacy name-linking workable).
-function linkedNameCandidates(): string[] {
-  const u = getCurrentUser()
-  if (!u) return []
-  const names = resolveNamesFromSettings(u.linkedMemberIds)
-  if (names.length > 0) return names
-  // Fallback: allow linking by name directly (ids array may actually contain names in some datasets)
-  return u.linkedMemberIds.map(s => String(s || '').trim()).filter(Boolean)
-}
-
-// Exact name match against attendees[] and responsibleAdult
 function evtInvolvesNames(evt: AnyRec, names: string[]): boolean {
   if (!names.length) return false
-  const attendees: string[] = Array.isArray(evt.attendees) ? evt.attendees.map((s:any)=>String(s||'').trim()) : []
-  const resp: string = String((evt as any).responsibleAdult || '').trim()
-  const canon = (s: string) => s.toLowerCase()
-  const attSet = new Set(attendees.map(canon))
-  const respC = canon(resp)
+  const canon = (s: string) => String(s || '').trim().toLowerCase()
+  const set = new Set((Array.isArray(evt.attendees) ? evt.attendees : []).map(canon))
+  const ra = canon((evt as any).responsibleAdult || '')
   for (const n of names) {
-    const nc = canon(n)
-    if (attSet.has(nc)) return true
-    if (respC && respC === nc) return true
+    const c = canon(n)
+    if (set.has(c)) return true
+    if (ra && ra === c) return true
   }
   return false
 }
 
-function fireChanged() { try { window.dispatchEvent(new CustomEvent('fc:events:changed')) } catch {} }
+function emitChanged() { try { window.dispatchEvent(new CustomEvent('fc:events:changed')) } catch {} }
+function toast(msg: string) { try { window.dispatchEvent(new CustomEvent('toast', { detail: msg })) } catch {} }
 
-// ---- FILTERED READS (signature EXACTLY matches baseline)
+// ---------- FILTERED READS (signature EXACT match to baseline) ----------
 export function listExpanded(from: DateTime, to: DateTime, query: string): EventRecord[] {
   const expanded = base.listExpanded(from, to, query)
 
-  if (!isAuthEnabled()) return expanded
-  if (!isMyAgendaOn()) return expanded
-  const user = getCurrentUser()
-  if (!user) return expanded
+  if (!featureAuthEnabled()) return expanded
+  if (!myAgendaOn()) return expanded
+  const u = currentUser()
+  if (!u) return expanded
 
   const names = linkedNameCandidates()
-  if (names.length === 0) return [] // agenda ON + no links: show nothing
+  if (names.length === 0) return []
 
   return expanded.filter(evt => evtInvolvesNames(evt, names))
 }
 
-// Re-export other read helpers unchanged
+// re-export other read helpers unchanged
 export const list      = (base as any).list      as typeof base.list
 export const listRange = (base as any).listRange as typeof base.listRange
 
-// ---- GUARDED WRITES (permissions)
-function canWrite(user: ReturnType<typeof getCurrentUser>, before: EventRecord | null, after: EventRecord | null): boolean {
-  if (!user) return true
-  if (user.role === 'parent') return true
-  if (user.role === 'child') return false
+// ---------- GUARDED WRITES ----------
+function canWrite(u: ReturnType<typeof currentUser>, before: EventRecord | null, after: EventRecord | null): boolean {
+  if (!u) return true
+  if (u.role === 'parent') return true
+  if (u.role === 'child') return false
   const names = linkedNameCandidates()
   if (names.length === 0) return false
   if (after && evtInvolvesNames(after, names)) return true
   if (before && evtInvolvesNames(before, names)) return true
   return false
 }
-function alertOnce(msg: string) { try { alert(msg) } catch {} }
 
 export function upsertEvent(evt: EventRecord): EventRecord {
-  if (!isAuthEnabled()) return base.upsertEvent(evt)
-  const user = getCurrentUser()
-  if (!user) return base.upsertEvent(evt)
-  if (user.role === 'child') { alertOnce('Read-only account: child users cannot change events.'); return evt }
-  if (user.role === 'adult') {
+  if (!featureAuthEnabled()) return base.upsertEvent(evt)
+  const u = currentUser()
+  if (!u) return base.upsertEvent(evt)
+
+  if (u.role === 'child') { toast('Children cannot change events.'); return evt }
+  if (u.role === 'adult') {
     const all = safeParse<EventRecord[]>(localStorage.getItem(LS_EVENTS)) || []
     const before = all.find(e => e && e.id === evt.id) || null
-    if (!canWrite(user, before, evt)) { alertOnce('You can only change events that involve your linked members.'); return evt }
+    if (!canWrite(u, before, evt)) { toast('You can only change events that involve your linked members.'); return evt }
   }
   const saved = base.upsertEvent(evt)
-  fireChanged()
+  emitChanged()
   return saved
 }
 
 export function deleteEvent(id: string): void {
-  if (!isAuthEnabled()) { base.deleteEvent(id); return }
-  const user = getCurrentUser()
-  if (!user) { base.deleteEvent(id); return }
-  if (user.role === 'child') { alertOnce('Read-only account: child users cannot delete events.'); return }
-  if (user.role === 'adult') {
+  if (!featureAuthEnabled()) { base.deleteEvent(id); return }
+  const u = currentUser()
+  if (!u) { base.deleteEvent(id); return }
+
+  if (u.role === 'child') { toast('Children cannot delete events.'); return }
+  if (u.role === 'adult') {
     const all = safeParse<EventRecord[]>(localStorage.getItem(LS_EVENTS)) || []
     const before = all.find(e => e && e.id === id) || null
-    if (!canWrite(user, before, null)) { alertOnce('You can only delete events that involve your linked members.'); return }
+    if (!canWrite(u, before, null)) { toast('You can only delete events that involve your linked members.'); return }
   }
   base.deleteEvent(id)
-  fireChanged()
+  emitChanged()
 }
 
-// Re-export everything else from baseline untouched
+// Re-export everything else unchanged
 export * from './events'
 
-// Reactivity bridge: when agenda/auth/flags change, tell views to refresh via existing channel
+// Reactive bridge so views refresh without manual reloads
 ;(function bridge() {
-  const fire = () => fireChanged()
+  const fire = () => emitChanged()
   window.addEventListener('fc:users:changed', fire)
   window.addEventListener('fc:settings:changed', fire)
   window.addEventListener('storage', (e) => {
