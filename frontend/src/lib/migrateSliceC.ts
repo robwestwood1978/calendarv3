@@ -1,8 +1,7 @@
 // frontend/src/lib/migrateSliceC.ts
-// Idempotent hardening for Slice C (safe to run every load).
-// - Ensure fc_settings_v3 has myAgendaOnly?: boolean (default false).
-// - Ensure events have a stable id (prefix 'e_' + timestamp + rand) if missing.
-// - Prepare optional ownership fields (createdByUserId?, ownerMemberId?) without changing behaviour.
+// SAFE, idempotent Slice C migration.
+// IMPORTANT: Do NOT create a new fc_settings_v3 from scratch.
+// If settings are missing, leave them missing so SettingsProvider can bootstrap defaults.
 
 type AnyRec = Record<string, any>
 
@@ -15,13 +14,35 @@ function safeParse<T = any>(raw: string | null): T | null {
 }
 function writeLS(key: string, val: any) { localStorage.setItem(key, JSON.stringify(val)) }
 
+// Only harden an **existing** settings object.
+// If nothing exists (null) or it's an empty object lacking core fields, DO NOTHING.
 function ensureSettings() {
-  const s = safeParse<any>(localStorage.getItem(LS_SETTINGS)) || {}
+  const raw = localStorage.getItem(LS_SETTINGS)
+  const s = safeParse<any>(raw)
+
+  // Nothing stored yet → let SettingsProvider bootstrap; do not write.
+  if (s == null) return
+
+  // Heuristic: only patch if this looks like a real settings payload (has known fields).
+  const looksReal =
+    typeof s === 'object' &&
+    (
+      Array.isArray(s.members) ||
+      typeof s.defaults === 'object' ||
+      typeof s.weekStartMonday === 'boolean' ||
+      typeof s.timeFormat24h === 'boolean'
+    )
+
+  if (!looksReal) return // don't touch odd/partial objects
+
   let changed = false
 
-  if (typeof s.myAgendaOnly !== 'boolean') { s.myAgendaOnly = false; changed = true }
+  // Only add myAgendaOnly if not present
+  if (typeof s.myAgendaOnly !== 'boolean') {
+    s.myAgendaOnly = false
+    changed = true
+  }
 
-  // Keep existing members, colour rules, etc. intact. Do not mutate shape otherwise.
   if (changed) writeLS(LS_SETTINGS, s)
 }
 
@@ -33,7 +54,7 @@ function ensureEvents() {
   for (const e of arr) {
     if (!e || typeof e !== 'object') continue
     if (!e.id) { e.id = `e_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`; changed = true }
-    // Non-breaking stubs for Slice D sync:
+    // Non-breaking sync stubs (don’t change behaviour)
     if (e.createdByUserId === undefined) e.createdByUserId = undefined
     if (e.ownerMemberId === undefined) e.ownerMemberId = undefined
   }
@@ -44,5 +65,7 @@ export function migrateSliceC(): void {
   try {
     ensureSettings()
     ensureEvents()
-  } catch { /* no-op; never throw during boot */ }
+  } catch {
+    // never throw during app boot
+  }
 }
