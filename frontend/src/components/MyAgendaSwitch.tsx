@@ -1,14 +1,17 @@
-// frontend/src/components/MyAgendaSwitch.tsx
 import React from 'react'
 
+const KEY = 'fc_my_agenda_v1'
+
 function readState(): boolean {
-  try { return !!JSON.parse(localStorage.getItem('fc_my_agenda_v1') || '{}').on }
+  try { return !!JSON.parse(localStorage.getItem(KEY) || '{}').on }
   catch { return false }
 }
 function writeState(on: boolean) {
-  localStorage.setItem('fc_my_agenda_v1', JSON.stringify({ on }))
-  // Nudge the app to refresh without full reload
-  try { window.dispatchEvent(new CustomEvent('fc:settings:changed')) } catch {}
+  localStorage.setItem(KEY, JSON.stringify({ on }))
+  try {
+    window.dispatchEvent(new CustomEvent('fc:my-agenda:changed'))
+    window.dispatchEvent(new CustomEvent('fc:events-changed'))
+  } catch {}
 }
 
 export default function MyAgendaSwitch() {
@@ -16,7 +19,7 @@ export default function MyAgendaSwitch() {
 
   React.useEffect(() => {
     const onStorage = (e: StorageEvent) => {
-      if (e && e.key === 'fc_my_agenda_v1') setOn(readState())
+      if (e && e.key === KEY) setOn(readState())
     }
     window.addEventListener('storage', onStorage)
     return () => window.removeEventListener('storage', onStorage)
