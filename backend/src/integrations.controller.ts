@@ -22,16 +22,20 @@ function allowlist(url: string): boolean {
 export class IntegrationsController {
   @Get('/fetch-ics')
   async fetchICS(@Query('url') url: string, @Res() res: Response) {
-    if (!url || !allowlist(url)) return res.status(400).send('Invalid or disallowed ICS URL');
+    if (!url || !allowlist(url)) {
+      return res.status(400).send('Invalid or disallowed ICS URL');
+    }
     try {
       const httpUrl = url.replace(/^webcal:/i, 'https:');
-      const r = await fetch(httpUrl as any, { redirect: 'follow' as any });
-      if (!r.ok) return res.status(r.status).send('Upstream ICS fetch failed');
-      const text = await r.text();
+      const upstream = await fetch(httpUrl as any, { redirect: 'follow' as any });
+      if (!upstream.ok) {
+        return res.status(upstream.status).send('Upstream ICS fetch failed');
+      }
+      const text = await upstream.text();
       res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
       res.setHeader('Cache-Control', 'public, max-age=300');
       return res.send(text);
-    } catch {
+    } catch (err) {
       return res.status(500).send('ICS proxy error');
     }
   }
