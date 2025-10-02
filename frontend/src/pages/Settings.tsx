@@ -2,12 +2,16 @@
 // Keeps your original Settings page (SettingsPage) and appends:
 // - Experiments card (toggle Slice C auth; default OFF, reloads page when changed)
 // - Account panel (only shown when flag is ON)
+// - Integrations panel (Slice D) for Apple/ICS calendars with member-mapping
 
 import React, { useEffect, useState } from 'react'
 import SettingsPage from '../components/SettingsPage'
 import { featureFlags } from '../state/featureFlags'
 import { useAuth } from '../auth/AuthProvider'
 import { useSettings } from '../state/settings'
+
+// ⬇️ NEW: Slice D integrations panel
+import IntegrationsPanel from '../components/integrations/IntegrationsPanel'
 
 type Flags = ReturnType<typeof featureFlags.get>
 
@@ -47,6 +51,9 @@ export default function Settings() {
 
       {/* Account: only shown when flag is ON */}
       {flags.authEnabled && <AccountPanel />}
+
+      {/* ⬇️ NEW: Slice D — Integrations panel (master toggle inside the panel) */}
+      <IntegrationsPanel />
     </div>
   )
 }
