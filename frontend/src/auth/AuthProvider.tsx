@@ -1,183 +1,239 @@
 // frontend/src/auth/AuthProvider.tsx
-// Offline-first local auth with seed users. Emits an events refresh when link/unlink changes.
+// Slice C Auth provider with a built-in Sign In dialog trigger.
+// - Stores users in localStorage (hashed passwords, SHA-256).
+// - Seeds three users if none exist (parent/adult/child).
+// - Exposes signIn()/signOut() and link/unlink members.
+// - Only active when feature flag authEnabled=true.
+// - Renders a SignInDialog when signIn() is called.
 
-import React, { createContext, useContext, useEffect, useMemo, useState } from 'react'
-import { featureFlags } from '../state/featureFlags'
+import React from 'react'
+import SignInDialog from '../components/SignInDialog'
 
-export type UserRole = 'parent' | 'adult' | 'child'
-export type User = {
+type UserRole = 'parent' | 'adult' | 'child'
+
+export type AuthUser = {
   id: string
   email: string
-  displayName?: string
   role: UserRole
-  passwordHash: string
   linkedMemberIds: string[]
 }
 
-type AuthCtx = {
-  currentUser: User | null
-  users: User[]
-  signIn: (email: string, password: string) => Promise<boolean>
+type Ctx = {
+  currentUser: AuthUser | null
+  users: AuthUser[]
+  signIn: () => void
   signOut: () => void
   linkMember: (memberId: string) => void
   unlinkMember: (memberId: string) => void
-  isParent: boolean
-  isAdult: boolean
-  isChild: boolean
+  isEnabled: boolean
 }
 
-const AuthContext = createContext<AuthCtx | null>(null)
+const AuthCtx = React.createContext<Ctx | null>(null)
 
-const LS_USERS = 'fc_users_v1'
+const LS_FLAGS   = 'fc_feature_flags_v1'
+const LS_USERS   = 'fc_users_v1'
 const LS_CURRENT = 'fc_current_user_v1'
-const LS_EVENTS = 'fc_events_v1'
 
-const seeds: Array<{ email: string; password: string; role: UserRole }> = [
-  { email: 'parent@local.test', password: 'parent123', role: 'parent' },
-  { email: 'adult@local.test',  password: 'adult123',  role: 'adult'  },
-  { email: 'child@local.test',  password: 'child123',  role: 'child'  },
-]
-
-function uid() { return `u_${Date.now()}_${Math.random().toString(36).slice(2)}` }
-
-async function sha256Hex(input: string): Promise<string> {
-  const enc = new TextEncoder().encode(input)
-  const buf = await crypto.subtle.digest('SHA-256', enc)
-  const bytes = Array.from(new Uint8Array(buf))
-  return bytes.map(b => b.toString(16).padStart(2, '0')).join('')
+function readFlags(): { authEnabled?: boolean } {
+  try { return JSON.parse(localStorage.getItem(LS_FLAGS) || '{}') } catch { return {} }
 }
-
-function loadUsers(): User[] {
+function readUsers(): AuthUser[] {
   try {
-    const raw = localStorage.getItem(LS_USERS)
-    if (!raw) return []
-    const arr = JSON.parse(raw)
-    return Array.isArray(arr) ? arr : []
-  } catch { return [] }
+    const arr = JSON.parse(localStorage.getItem(LS_USERS) || '[]')
+    if (Array.isArray(arr)) return arr
+  } catch {}
+  return []
 }
-function saveUsers(users: User[]) {
-  localStorage.setItem(LS_USERS, JSON.stringify(users))
+function writeUsers(u: AuthUser[]) {
+  localStorage.setItem(LS_USERS, JSON.stringify(u))
   try { window.dispatchEvent(new CustomEvent('fc:users:changed')) } catch {}
 }
-function loadCurrentId(): string | null {
-  try { return localStorage.getItem(LS_CURRENT) } catch { return null }
+function readCurrentId(): string | null {
+  return localStorage.getItem(LS_CURRENT)
 }
-function saveCurrentId(id: string | null) {
+function writeCurrentId(id: string | null) {
   if (id) localStorage.setItem(LS_CURRENT, id)
   else localStorage.removeItem(LS_CURRENT)
   try { window.dispatchEvent(new CustomEvent('fc:users:changed')) } catch {}
 }
 
-// Same-tab nudge so A/B readers re-parse events through our filtered getItem
-function pokeEventsRefresh() {
-  try {
-    const v = localStorage.getItem(LS_EVENTS)
-    localStorage.setItem(LS_EVENTS, v ?? '[]')
-    try { window.dispatchEvent(new CustomEvent('fc:events:changed')) } catch {}
-  } catch {}
+async function sha256(text: string): Promise<string> {
+  const enc = new TextEncoder().encode(text)
+  const buf = await crypto.subtle.digest('SHA-256', enc)
+  const arr = Array.from(new Uint8Array(buf))
+  return arr.map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+// Seed three users on empty store (idempotent).
+async function ensureSeedUsers() {
+  const users = readUsers()
+  if (users.length > 0) return
+  const seed: (Omit<AuthUser, 'linkedMemberIds'> & { passwordHash: string; linkedMemberIds: string[] })[] = [
+    { id: `u_${Date.now()}_p`, email: 'parent@local.test', role: 'parent', passwordHash: await sha256('parent123'), linkedMemberIds: [] },
+    { id: `u_${Date.now()}_a`, email: 'adult@local.test',  role: 'adult',  passwordHash: await sha256('adult123'),  linkedMemberIds: [] },
+    { id: `u_${Date.now()}_c`, email: 'child@local.test',  role: 'child',  passwordHash: await sha256('child123'),  linkedMemberIds: [] },
+  ]
+  // Store only the fields we read back (email, role, id, linkedMemberIds) + passwordHash for verification
+  localStorage.setItem(LS_USERS, JSON.stringify(seed))
+}
+
+function isAuthEnabled(): boolean {
+  return !!readFlags().authEnabled
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [users, setUsers] = useState<User[]>(() => loadUsers())
-  const [currentId, setCurrentId] = useState<string | null>(() => loadCurrentId())
+  const [enabled, setEnabled] = React.useState(isAuthEnabled())
+  const [, force] = React.useState(0)
+  const [showDialog, setShowDialog] = React.useState(false)
+  const [current, setCurrent] = React.useState<AuthUser | null>(null)
+  const [users, setUsers] = React.useState<AuthUser[]>([])
 
-  // Keep users/currentId in sync across tabs
-  useEffect(() => {
-    const h = () => { setUsers(loadUsers()); setCurrentId(loadCurrentId()) }
-    window.addEventListener('storage', h)
-    window.addEventListener('fc:users:changed', h)
-    return () => { window.removeEventListener('storage', h); window.removeEventListener('fc:users:changed', h) }
-  }, [])
-
-  // Seed users on first load *if* flag is ON
-  useEffect(() => {
-    if (featureFlags.get().authEnabled && loadUsers().length === 0) {
-      seedUsers().then(() => setUsers(loadUsers()))
+  // React to flag toggles from Settings
+  React.useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e && e.key === LS_FLAGS) setEnabled(isAuthEnabled())
     }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
   }, [])
 
-  // ALSO seed users if the flag flips ON later (Settings → Experiments)
-  useEffect(() => {
-    const unsub = featureFlags.subscribe(() => {
-      const { authEnabled } = featureFlags.get()
-      if (authEnabled && loadUsers().length === 0) {
-        seedUsers().then(() => setUsers(loadUsers()))
+  // Boot: if enabled, seed users and load state
+  React.useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      if (!enabled) { setUsers([]); setCurrent(null); return }
+      await ensureSeedUsers()
+
+      // Load current users snapshot
+      const raw = localStorage.getItem(LS_USERS)
+      let list: any[] = []
+      try { list = JSON.parse(raw || '[]') } catch {}
+      // Normalize to AuthUser for context consumers (we keep passwordHash in storage only)
+      const norm: AuthUser[] = list.map(u => ({
+        id: u.id, email: u.email, role: u.role, linkedMemberIds: Array.isArray(u.linkedMemberIds) ? u.linkedMemberIds : []
+      }))
+      if (!cancelled) setUsers(norm)
+
+      const cid = readCurrentId()
+      if (cid) {
+        const found = norm.find(u => u.id === cid) || null
+        if (!cancelled) setCurrent(found)
+      } else {
+        if (!cancelled) setCurrent(null)
       }
-    })
-    return () => unsub()
-  }, [])
+    })()
+    return () => { cancelled = true }
+  }, [enabled, force])
 
-  const currentUser = useMemo(() => users.find(u => u.id === currentId) || null, [users, currentId])
+  // Public API
+  const signIn = () => {
+    if (!enabled) return
+    setShowDialog(true)
+  }
+  const signOut = () => {
+    writeCurrentId(null)
+    setCurrent(null)
+    setShowDialog(false)
+  }
 
-  async function seedUsers() {
-    const seeded: User[] = []
-    for (const s of seeds) {
-      const hash = await sha256Hex(`${s.email.toLowerCase()}|${s.password}`)
-      seeded.push({ id: uid(), email: s.email.toLowerCase(), role: s.role, passwordHash: hash, linkedMemberIds: [] })
+  const linkMember = (memberId: string) => {
+    if (!current) return
+    const raw = localStorage.getItem(LS_USERS)
+    let list: any[] = []
+    try { list = JSON.parse(raw || '[]') } catch {}
+    const idx = list.findIndex(u => u && u.id === current.id)
+    if (idx >= 0) {
+      const prevIds: string[] = Array.isArray(list[idx].linkedMemberIds) ? list[idx].linkedMemberIds : []
+      if (!prevIds.includes(memberId)) prevIds.push(memberId)
+      list[idx].linkedMemberIds = prevIds
+      localStorage.setItem(LS_USERS, JSON.stringify(list))
+      setUsers(list.map(u => ({ id: u.id, email: u.email, role: u.role, linkedMemberIds: u.linkedMemberIds || [] })))
+      setCurrent({ ...current, linkedMemberIds: prevIds })
+      try { window.dispatchEvent(new CustomEvent('fc:users:changed')) } catch {}
     }
-    saveUsers(seeded)
   }
 
-  async function signIn(email: string, password: string): Promise<boolean> {
-    if (!featureFlags.get().authEnabled) return false
-    const e = email.trim().toLowerCase()
-    const hash = await sha256Hex(`${e}|${password}`)
-    const u = loadUsers().find(x => x.email === e && x.passwordHash === hash) || null
-    if (!u) return false
-    saveCurrentId(u.id)
-    setCurrentId(u.id)
-    // After sign-in, poke to ensure views reflect this user's links if toggle is ON
-    pokeEventsRefresh()
-    return true
-  }
-  function signOut() {
-    saveCurrentId(null)
-    setCurrentId(null)
-    // After sign-out, poke so "My agenda" (if ON) shows nothing
-    pokeEventsRefresh()
+  const unlinkMember = (memberId: string) => {
+    if (!current) return
+    const raw = localStorage.getItem(LS_USERS)
+    let list: any[] = []
+    try { list = JSON.parse(raw || '[]') } catch {}
+    const idx = list.findIndex(u => u && u.id === current.id)
+    if (idx >= 0) {
+      const prevIds: string[] = Array.isArray(list[idx].linkedMemberIds) ? list[idx].linkedMemberIds : []
+      const nextIds = prevIds.filter((x: string) => x !== memberId)
+      list[idx].linkedMemberIds = nextIds
+      localStorage.setItem(LS_USERS, JSON.stringify(list))
+      setUsers(list.map(u => ({ id: u.id, email: u.email, role: u.role, linkedMemberIds: u.linkedMemberIds || [] })))
+      setCurrent({ ...current, linkedMemberIds: nextIds })
+      try { window.dispatchEvent(new CustomEvent('fc:users:changed')) } catch {}
+    }
   }
 
-  function updateUser(u: User) {
-    const next = loadUsers().map(x => x.id === u.id ? u : x)
-    saveUsers(next)
-    setUsers(next)
-    // IMPORTANT: when link/unlink changes, nudge event consumers to re-evaluate
-    pokeEventsRefresh()
-  }
-
-  function linkMember(memberId: string) {
-    if (!currentUser) return
-    if (currentUser.linkedMemberIds.includes(memberId)) return
-    updateUser({ ...currentUser, linkedMemberIds: [...currentUser.linkedMemberIds, memberId] })
-  }
-  function unlinkMember(memberId: string) {
-    if (!currentUser) return
-    updateUser({ ...currentUser, linkedMemberIds: currentUser.linkedMemberIds.filter(id => id !== memberId) })
-  }
-
-  const value: AuthCtx = {
-    currentUser,
+  const value: Ctx = {
+    currentUser: current,
     users,
     signIn,
     signOut,
     linkMember,
     unlinkMember,
-    isParent: currentUser?.role === 'parent',
-    isAdult: currentUser?.role === 'adult',
-    isChild: currentUser?.role === 'child',
+    isEnabled: enabled,
   }
 
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+  // Listen for external user changes (other tabs/settings)
+  React.useEffect(() => {
+    const onChange = () => force(x => x + 1)
+    window.addEventListener('fc:users:changed', onChange as any)
+    return () => window.removeEventListener('fc:users:changed', onChange as any)
+  }, [])
+
+  // Verify credentials when dialog submits
+  const handleSubmit = async (email: string, password: string) => {
+    try {
+      const listRaw = localStorage.getItem(LS_USERS)
+      const list: any[] = listRaw ? JSON.parse(listRaw) : []
+      const user = list.find(u => u && u.email === email)
+      if (!user) return { ok: false, message: 'Unknown email' }
+      const hash = await sha256(password)
+      if (user.passwordHash !== hash) return { ok: false, message: 'Incorrect password' }
+
+      writeCurrentId(user.id)
+      setCurrent({ id: user.id, email: user.email, role: user.role, linkedMemberIds: user.linkedMemberIds || [] })
+      setShowDialog(false)
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, message: 'Sign in failed' }
+    }
+  }
+
+  return (
+    <AuthCtx.Provider value={value}>
+      {children}
+      {/* Modal lives inside provider so AccountMenu.signIn() always opens it */}
+      {enabled && (
+        <SignInDialog
+          open={showDialog}
+          onClose={() => setShowDialog(false)}
+          onSubmit={handleSubmit}
+        />
+      )}
+    </AuthCtx.Provider>
+  )
 }
 
-export function useAuth() {
-  return useContext(AuthContext) || {
-    currentUser: null,
-    users: [],
-    signIn: async () => false,
-    signOut: () => {},
-    linkMember: () => {},
-    unlinkMember: () => {},
-    isParent: false, isAdult: false, isChild: false,
-  } as AuthCtx
+export function useAuth(): Ctx {
+  const ctx = React.useContext(AuthCtx)
+  if (!ctx) {
+    // Provide a no-op fallback so non-auth builds don’t crash.
+    return {
+      currentUser: null,
+      users: [],
+      signIn: () => {},
+      signOut: () => {},
+      linkMember: () => {},
+      unlinkMember: () => {},
+      isEnabled: false,
+    }
+  }
+  return ctx
 }
