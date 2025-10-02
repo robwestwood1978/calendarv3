@@ -10,14 +10,12 @@ export default function Home() {
   const nav = useNavigate()
   const [query, setQuery] = useState('')
 
-  // Show only today → next 7 days
   const start = DateTime.local().startOf('day')
   const end = start.plus({ days: 7 }).endOf('day')
   const now = DateTime.local()
 
   const events = useMemo(() => {
     const data = listExpanded(start, end, query)
-    // Ensure valid times and drop anything that already finished before "now"
     return data.filter(e => {
       const st = DateTime.fromISO(e.start)
       const en = DateTime.fromISO(e.end)
@@ -25,7 +23,6 @@ export default function Home() {
     })
   }, [start.toISO(), end.toISO(), query])
 
-  // group by day
   const byDay = useMemo(() => {
     const map = new Map<string, EventRecord[]>()
     for (const e of events) {
