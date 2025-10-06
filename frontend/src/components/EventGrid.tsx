@@ -1,4 +1,3 @@
-// frontend/src/components/EventGrid.tsx
 import React, { useState } from 'react'
 import { DateTime } from 'luxon'
 import { listExpanded } from '../state/events-agenda'
@@ -20,9 +19,24 @@ function toast(msg: string) {
   try { window.dispatchEvent(new CustomEvent('toast', { detail: msg })) } catch {}
 }
 
+/** Safely compute a colour for a local event; never throws. */
+function safePickEventColour(ev: EventRecord, settings: any): string | undefined {
+  try {
+    const rules = Array.isArray(settings?.colourRules) ? settings.colourRules : []
+    const memberLookup = settings?.memberLookup && typeof settings.memberLookup === 'object'
+      ? settings.memberLookup
+      : undefined
+    // If neither rules nor memberLookup, let caller fall back to calendar colour
+    if ((!rules || rules.length === 0) && !memberLookup) return undefined
+    return pickEventColour(ev, { rules, memberLookup })
+  } catch {
+    return undefined
+  }
+}
+
 export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize }: GridProps) {
   const settings = useSettings()
-  const hourHeight = settings.denseHours ? 44 : 60
+  const hourHeight = settings?.denseHours ? 44 : 60
 
   const start = view === 'week' ? cursor.startOf('week') : cursor
   const days = view === '3day' ? 3 : view === 'day' ? 1 : 7
@@ -113,10 +127,12 @@ function DayColumn({
     const top = (s.diff(dayStart, 'minutes').minutes / 60) * hourHeight
     const height = (e.diff(s, 'minutes').minutes / 60) * hourHeight
 
-    const color = pickEventColour(ev, {
-      rules: settings.colourRules,
-      memberLookup: settings.memberLookup,
-    })
+    // Priority:
+    // 1) External calendar colour if provided
+    // 2) Safe local rule colour (never throws)
+    // 3) Theme default
+    const ruleColour = safePickEventColour(ev, settings)
+    const colour = (ev as any)._calendarColor || ruleColour || 'var(--primary)'
 
     const startDrag = (md: React.MouseEvent) => {
       md.stopPropagation(); md.preventDefault()
@@ -130,7 +146,7 @@ function DayColumn({
         window.removeEventListener('mouseup', onUpDoc)
         setDrag(prev => {
           if (prev && prev.key === key && prev.type === 'move' && prev.deltaMin !== 0) {
-            // ✅ Preserve metadata so state layer can shadow/block correctly
+            // Preserve all meta so the state layer can shadow/block correctly
             onCommitChange({ ...ev, start: s0.plus({ minutes: prev.deltaMin }).toISO()!, end: e0.plus({ minutes: prev.deltaMin }).toISO()! })
           }
           return null
@@ -151,7 +167,6 @@ function DayColumn({
         window.removeEventListener('mouseup', onUpDoc)
         setDrag(prev => {
           if (prev && prev.key === key && prev.type === 'resize' && prev.deltaMin !== 0) {
-            // ✅ Preserve metadata so state layer can shadow/block correctly
             onCommitChange({ ...ev, end: e0.plus({ minutes: prev.deltaMin }).toISO()! })
           }
           return null
@@ -168,7 +183,7 @@ function DayColumn({
         className="event"
         style={{
           top, height,
-          borderLeft: `3px solid ${(ev as any)._calendarColor || color}`,
+          borderLeft: `3px solid ${colour}`,
           paddingLeft: 6,
           opacity: isPreviewing ? 0.8 : 1,
         }}
@@ -188,7 +203,6 @@ function DayColumn({
       {Array.from({ length: 24 }).map((_, h) => (
         <div key={h} className="hour-row" style={{ height: `${hourHeight}px` }} />
       ))}
-
       {/* events */}
       {events.map(renderEvt)}
     </div>
@@ -218,7 +232,8 @@ export function MonthGrid({ cursor, query, onNewAt, onEdit, onMoveOrResize }: Mo
     const s0 = DateTime.fromISO(original.start); const e0 = DateTime.fromISO(original.end)
     const s1 = newDay.set({ hour: s0.hour, minute: s0.minute })
     const delta = s1.diff(s0, 'minutes').minutes
-    const updated: EventRecord = { ...original, start: s0.plus({ minutes: delta }).toISO()!, end: e0.plus({ minutes: delta }).toISO()! } // ✅ preserve meta
+    // Preserve meta here too
+    const updated: EventRecord = { ...original, start: s0.plus({ minutes: delta }).toISO()!, end: e0.plus({ minutes: delta }).toISO()! }
     if (onMoveOrResize) onMoveOrResize(updated)
   }
 
