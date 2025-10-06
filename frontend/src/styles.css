@@ -444,3 +444,13 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   color: #fff;
   border-color: var(--primary);
 }
+/* Final guard: no pseudo/overlay on calendar events */
+.timewrap .event::before,
+.timewrap .event::after,
+.timewrap .event *::before,
+.timewrap .event *::after {
+  content: none !important;
+  display: none !important;
+  background: none !important;
+  box-shadow: none !important;
+}
