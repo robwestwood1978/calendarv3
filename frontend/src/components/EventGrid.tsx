@@ -67,10 +67,17 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
 
   return (
     <div className="timewrap" style={{ ['--head-h' as any]: '34px' }}>
-      {/* Hard override to remove any legacy pseudo-element overlays on events */}
+      {/* 🔧 Kill any legacy pseudo/overlay in the grid only, and ensure our events sit on top */}
       <style>{`
         .timewrap .event::before,
         .timewrap .event::after { content: none !important; display: none !important; }
+        .timewrap .event [data-overlay],
+        .timewrap .event .overlay,
+        .timewrap .event .pill,
+        .timewrap .event .bg,
+        .timewrap .day-body .event-overlay,
+        .timewrap .day-body .event-ghost { display: none !important; }
+        .timewrap .event { z-index: 1000 !important; }
       `}</style>
 
       <div className="time-gutter" aria-hidden="true">
@@ -164,21 +171,20 @@ function DayColumn({
         setDrag(prev => {
           if (prev && prev.key === key && prev.type === type) {
             if (!prev.moved) {
-              // Treat as click
               onEdit(ev)
             } else if (prev.deltaMin !== 0) {
               // Commit change (preserve meta + send _prevStart for externals)
               if (type === 'move') {
                 onCommitChange({
                   ...ev,
-                  _prevStart: ev.start,
+                  _prevStart: (ev as any).start,
                   start: s0.plus({ minutes: prev.deltaMin }).toISO()!,
                   end:   e0.plus({ minutes: prev.deltaMin }).toISO()!,
                 } as any)
               } else {
                 onCommitChange({
                   ...ev,
-                  _prevStart: ev.start,
+                  _prevStart: (ev as any).start,
                   end: e0.plus({ minutes: prev.deltaMin }).toISO()!,
                 } as any)
               }
@@ -204,7 +210,7 @@ function DayColumn({
           position: 'absolute',
           left: 6, right: 6,
           top, height,
-          zIndex: 5,               // make sure we sit above any stray overlays
+          zIndex: 1000,            // sit above any rogue overlay
           background: '#fff',
           borderRadius: 12,
           boxShadow: '0 2px 10px rgba(0,0,0,0.06)',
@@ -219,10 +225,11 @@ function DayColumn({
         <div
           className="evt-title"
           style={{
-            position: 'relative', zIndex: 2, // sit above any lingering pseudo-elements
+            position: 'relative', zIndex: 2,
             fontWeight: 600, fontSize: 13,
             whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
             color: 'var(--text, #0f172a)',
+            pointerEvents: 'auto',
           }}
           onClick={(e) => e.stopPropagation()}
           onDoubleClick={(e) => { e.stopPropagation(); onEdit(ev) }}
@@ -240,6 +247,7 @@ function DayColumn({
             height: 6, borderRadius: 999,
             background: 'rgba(0,0,0,0.08)',
             cursor: 'ns-resize',
+            zIndex: 2,
           }}
         />
       </div>
@@ -248,17 +256,15 @@ function DayColumn({
 
   return (
     <div className="day-body" style={{ position: 'relative' }}>
-      {/* hour rows */}
       {Array.from({ length: 24 }).map((_, h) => (
         <div key={h} className="hour-row" style={{ height: `${hourHeight}px`, borderTop: '1px solid #eef2f7' }} />
       ))}
-      {/* events */}
       {events.map(renderEvt)}
     </div>
   )
 }
 
-/* ---------------- Month grid (click to open; drag to move) ---------------- */
+/* ---------------- Month grid ---------------- */
 
 interface MonthGridProps {
   cursor: DateTime
