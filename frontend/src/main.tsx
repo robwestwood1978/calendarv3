@@ -35,6 +35,7 @@ import SignInDock from './components/SignInDock'
 import { AuthProvider } from './auth/AuthProvider'
 import { migrateSliceC } from './lib/migrateSliceC'
 import './styles.css'
+import './hotfix.css'
 
 // Run safe, idempotent migration (won't overwrite bootstrap defaults)
 migrateSliceC()
