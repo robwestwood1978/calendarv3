@@ -444,13 +444,20 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   color: #fff;
   border-color: var(--primary);
 }
-/* Final guard: no pseudo/overlay on calendar events */
-.timewrap .event::before,
-.timewrap .event::after,
-.timewrap .event *::before,
-.timewrap .event *::after {
-  content: none !important;
-  display: none !important;
-  background: none !important;
-  box-shadow: none !important;
+/* relevant excerpt – file kept intact, only the .timewrap .event card rules changed to avoid a white pill */
+
+.timewrap .event {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  background: transparent;            /* colour is provided inline per-event */
+  color: inherit;                      /* text color computed inline for contrast */
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  border-left: 3px solid var(--primary); /* actual color is set inline */
+  padding: 6px 8px 10px 8px;
+  user-select: none;
+  cursor: pointer;
 }
+/* … keep the rest of your styles.css exactly as in your repo … */
+
