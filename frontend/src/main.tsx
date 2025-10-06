@@ -34,23 +34,19 @@ import AgendaRefreshBridge from './components/AgendaRefreshBridge'
 import SignInDock from './components/SignInDock'
 import { AuthProvider } from './auth/AuthProvider'
 import { migrateSliceC } from './lib/migrateSliceC'
-import './styles.css'
+import './styles.css'   // <-- only this
 
 // Run safe, idempotent migration (won't overwrite bootstrap defaults)
 migrateSliceC()
 
 function RootApp() {
-  // “Pulse” causes the routed subtree to remount whenever auth/agenda/flags change.
   const [pulse, setPulse] = React.useState(0)
-
   return (
     <React.StrictMode>
       <SettingsProvider>
         <AuthProvider>
           <BrowserRouter>
-            {/* Invisible: listens for account/link/toggle/flag changes */}
             <AgendaRefreshBridge onPulse={() => setPulse(p => (p + 1) % 1_000_000)} />
-            {/* Fixed overlay that shows Sign in + My Agenda (only when accounts are enabled) */}
             <SignInDock />
             <Routes key={pulse}>
               <Route element={<AppLayout />}>
