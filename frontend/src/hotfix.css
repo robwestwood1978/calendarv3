@@ -1,0 +1,42 @@
+/* ---- Global hotfix for legacy event overlays ---- */
+
+/* Kill any pseudo-element masks often used to draw “pills” */
+.event::before,
+.event::after,
+.timewrap .event::before,
+.timewrap .event::after {
+  content: none !important;
+  display: none !important;
+}
+
+/* Kill common overlay element classnames if they exist */
+.event .overlay,
+.event .pill,
+.event .bg,
+.event-overlay,
+.event-ghost,
+.timewrap .event [data-overlay] {
+  display: none !important;
+  pointer-events: none !important;
+}
+
+/* Ensure calendar events don't draw unexpected back-layers via box shadows */
+.timewrap .event {
+  background: #fff;
+  z-index: 1000 !important;          /* over grid lines */
+}
+
+/* Make sure the modal is always on top of any straggler overlay */
+.modal-backdrop,
+.modal-backdrop .modal {
+  position: fixed !important;
+  z-index: 20000 !important;          /* above everything */
+}
+
+/* (Optional) if something else still wins z-order, this nukes ALL page overlays */
+body .overlay,
+body .pill,
+body .bg {
+  display: none !important;
+  pointer-events: none !important;
+}
