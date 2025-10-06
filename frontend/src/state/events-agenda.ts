@@ -72,6 +72,19 @@ function writeShadows(arr: Shadow[]) { localStorage.setItem(LS_SHADOWS, JSON.str
 /** Map of extKey -> Shadow */
 function shadowMap(): Map<string, Shadow> { const map = new Map<string, Shadow>(); for (const s of readShadows()) map.set(s.extKey, s); return map }
 
+/* -------- local ext identity helpers (self-contained) ---------- */
+function parseFromId(id: string): { calId?: string, uid?: string } {
+  if (!id || !id.startsWith('ext:')) return {}
+  const parts = id.split(':') // ext:calId:uid:...
+  return { calId: parts[1], uid: parts[2] }
+}
+function getExtIdentityLocal(evt: any): { calId?: string, uid?: string } {
+  const fromId = parseFromId(String(evt?.id || ''))
+  const calId = evt?._calendarId || fromId.calId
+  const uid   = evt?._uid        || fromId.uid
+  return { calId, uid }
+}
+
 // ---------- FILTERED READS ----------
 export function listExpanded(from: DateTime, to: DateTime, query: string): EventRecord[] {
   const locals = (base.listExpanded(from, to, query) as EventRecord[]).filter(e => overlaps(e, from, to))
@@ -158,42 +171,40 @@ function canWrite(u: ReturnType<typeof currentUser>, before: EventRecord | null,
 }
 
 export function upsertEvent(evt: EventRecord, scope?: 'single'|'following'|'series'): EventRecord {
-  // External edits → local overlays
+  // ---------- EXTERNAL EDITS: local shadow + tombstone ----------
   if (isExternal(evt)) {
-    const calId = (evt as any)._calendarId as string | undefined
+    const { calId, uid } = getExtIdentityLocal(evt as any)
     const cal = calId ? listCalendars().find(c => c.id === calId) : undefined
     if (!cal || !cal.allowEditLocal) {
       toast('This event is from an external calendar. Enable “Allow editing (local)” in Integrations to edit it.')
       return evt
     }
 
-    // We need both the old key (before move) and the new key (after move)
     const prevStart = (evt as any)._prevStart as string | undefined
-    const uid = (evt as any)._uid
-    const newKey = toExtKey(evt)
-    const oldKey = (prevStart && uid && calId) ? `${calId}::${uid}::${prevStart}` : newKey
+    const newKey = toExtKey(evt as any)
+    const oldKey = (prevStart && calId && uid) ? `${calId}::${uid}::${prevStart}` : newKey
 
     const shadows = readShadows()
 
-    // 1) Tombstone the old provider instance (hide original at its previous time)
+    // tombstone (hide original at old time)
     if (oldKey && prevStart && newKey && newKey !== oldKey) {
-      const idxOld = shadows.findIndex(s => s.extKey === oldKey && (s as any).source === 'tombstone')
       const tomb: Tombstone = { source: 'tombstone', extKey: oldKey, shadowAt: new Date().toISOString() }
-      if (idxOld >= 0) shadows[idxOld] = tomb; else shadows.push(tomb)
+      const iOld = shadows.findIndex(s => s.extKey === oldKey && (s as any).source === 'tombstone')
+      if (iOld >= 0) shadows[iOld] = tomb; else shadows.push(tomb)
     }
 
-    // 2) Shadow for the (possibly moved) event at its new time
+    // shadow (show moved/edited copy at new time)
     if (newKey) {
-      const baseShadow = { ...(evt as any), source: 'shadow', extKey: newKey, shadowOf: String(evt.id), shadowAt: new Date().toISOString() }
-      const idx = shadows.findIndex(s => s.extKey === newKey && (s as any).source === 'shadow')
-      if (idx >= 0) shadows[idx] = baseShadow as Shadow; else shadows.push(baseShadow as Shadow)
+      const shadow = { ...(evt as any), source: 'shadow' as const, extKey: newKey, shadowOf: String(evt.id), shadowAt: new Date().toISOString() }
+      const iNew = shadows.findIndex(s => s.extKey === newKey && (s as any).source === 'shadow')
+      if (iNew >= 0) shadows[iNew] = shadow as any; else shadows.push(shadow as any)
     }
 
     writeShadows(shadows)
     return evt
   }
 
-  // Local edits (and all non-external) → baseline with Slice C guards
+  // ---------- LOCAL/INTERNAL EDITS ----------
   if (!featureAuthEnabled()) { const saved = (base as any).upsertEvent(evt, scope); emitChanged(); return saved }
   const u = currentUser()
   if (!u) { const saved = (base as any).upsertEvent(evt, scope); emitChanged(); return saved }
