@@ -26,7 +26,6 @@ function safePickEventColour(ev: EventRecord, settings: any): string | undefined
     const memberLookup = settings?.memberLookup && typeof settings.memberLookup === 'object'
       ? settings.memberLookup
       : undefined
-    // If neither rules nor memberLookup, let caller fall back to calendar colour
     if ((!rules || rules.length === 0) && !memberLookup) return undefined
     return pickEventColour(ev, { rules, memberLookup })
   } catch {
@@ -127,10 +126,7 @@ function DayColumn({
     const top = (s.diff(dayStart, 'minutes').minutes / 60) * hourHeight
     const height = (e.diff(s, 'minutes').minutes / 60) * hourHeight
 
-    // Priority:
-    // 1) External calendar colour if provided
-    // 2) Safe local rule colour (never throws)
-    // 3) Theme default
+    // Colours: calendar tint takes precedence; fall back to rule colour; else theme
     const ruleColour = safePickEventColour(ev, settings)
     const colour = (ev as any)._calendarColor || ruleColour || 'var(--primary)'
 
@@ -146,7 +142,6 @@ function DayColumn({
         window.removeEventListener('mouseup', onUpDoc)
         setDrag(prev => {
           if (prev && prev.key === key && prev.type === 'move' && prev.deltaMin !== 0) {
-            // Preserve all meta so the state layer can shadow/block correctly
             onCommitChange({ ...ev, start: s0.plus({ minutes: prev.deltaMin }).toISO()!, end: e0.plus({ minutes: prev.deltaMin }).toISO()! })
           }
           return null
@@ -181,18 +176,39 @@ function DayColumn({
       <div
         key={key}
         className="event"
-        style={{
-          top, height,
-          borderLeft: `3px solid ${colour}`,
-          paddingLeft: 6,
-          opacity: isPreviewing ? 0.8 : 1,
-        }}
         onDoubleClick={() => onEdit(ev)}
         onMouseDown={startDrag}
         role="button"
+        style={{
+          position: 'absolute',               // ✅ FIX: layer events above the grid
+          left: 6, right: 6,
+          top, height,
+          zIndex: 2,
+          background: '#fff',
+          borderRadius: 10,
+          boxShadow: '0 2px 10px rgba(0,0,0,0.06)',
+          borderLeft: `3px solid ${colour}`,
+          padding: '6px 8px 10px 8px',
+          cursor: 'grab',
+          opacity: isPreviewing ? 0.9 : 1,
+          userSelect: 'none',
+        }}
       >
-        <div className="evt-title">{ev.title}</div>
-        <div className="evt-resize" onMouseDown={startResize} />
+        <div className="evt-title" style={{ fontWeight: 600, fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {ev.title}
+        </div>
+        {/* tiny resize handle */}
+        <div
+          className="evt-resize"
+          onMouseDown={startResize}
+          style={{
+            position: 'absolute',
+            left: 8, right: 8, bottom: 2,
+            height: 6, borderRadius: 3,
+            background: 'rgba(0,0,0,0.08)',
+            cursor: 'ns-resize',
+          }}
+        />
       </div>
     )
   }
@@ -201,7 +217,7 @@ function DayColumn({
     <div className="day-body" style={{ position: 'relative' }}>
       {/* hour rows */}
       {Array.from({ length: 24 }).map((_, h) => (
-        <div key={h} className="hour-row" style={{ height: `${hourHeight}px` }} />
+        <div key={h} className="hour-row" style={{ height: `${hourHeight}px`, borderTop: '1px solid #eef2f7' }} />
       ))}
       {/* events */}
       {events.map(renderEvt)}
@@ -209,7 +225,7 @@ function DayColumn({
   )
 }
 
-/* ---------------- Month grid (optional drag) ---------------- */
+/* ---------------- Month grid (drag without overlay) ---------------- */
 
 interface MonthGridProps {
   cursor: DateTime
@@ -232,7 +248,6 @@ export function MonthGrid({ cursor, query, onNewAt, onEdit, onMoveOrResize }: Mo
     const s0 = DateTime.fromISO(original.start); const e0 = DateTime.fromISO(original.end)
     const s1 = newDay.set({ hour: s0.hour, minute: s0.minute })
     const delta = s1.diff(s0, 'minutes').minutes
-    // Preserve meta here too
     const updated: EventRecord = { ...original, start: s0.plus({ minutes: delta }).toISO()!, end: e0.plus({ minutes: delta }).toISO()! }
     if (onMoveOrResize) onMoveOrResize(updated)
   }
@@ -249,6 +264,16 @@ export function MonthGrid({ cursor, query, onNewAt, onEdit, onMoveOrResize }: Mo
             key={day.toISODate()}
             className={`mcell ${day.hasSame(cursor, 'month') ? '' : 'dim'}`}
             onDoubleClick={() => onNewAt(day.set({ hour: 9, minute: 0 }))}
+            onDragOver={(ev) => ev.preventDefault()}             // ✅ attach to cell; no overlay
+            onDrop={(ev) => {
+              ev.preventDefault()
+              try {
+                const raw = ev.dataTransfer.getData('text/plain')
+                const original = JSON.parse(raw) as EventRecord
+                onDragDay(original, day)
+              } catch {}
+            }}
+            style={{ position: 'relative' }}
           >
             <div className="mhead">{i < 7 ? day.toFormat('ccc d LLL') : day.toFormat('d')}</div>
             <div className="mitems">
@@ -270,19 +295,6 @@ export function MonthGrid({ cursor, query, onNewAt, onEdit, onMoveOrResize }: Mo
                 </div>
               ))}
             </div>
-            {/* drop target */}
-            <div
-              className="dropzone"
-              onDragOver={(ev) => ev.preventDefault()}
-              onDrop={(ev) => {
-                ev.preventDefault()
-                try {
-                  const raw = ev.dataTransfer.getData('text/plain')
-                  const original = JSON.parse(raw) as EventRecord
-                  onDragDay(original, day)
-                } catch {}
-              }}
-            />
           </div>
         )
       })}
