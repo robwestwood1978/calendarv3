@@ -196,18 +196,11 @@ export default function EventModal({ open, initial, onClose, onSave }: Props) {
       ...(remindersMin.length ? { remindersMin } : {}),
     } as any
 
-    // >>> Minimal fix for external events via MODAL:
-    // If start time changed, include _prevStart so shadow/tombstone logic hides original instance.
     if (initial && isExternal(initial)) {
-      const shadowPayload: any = { ...payload }
-      if (initial.start !== start) {
-        shadowPayload._prevStart = initial.start
-      }
-      upsertAgendaEvent(shadowPayload)
+      upsertAgendaEvent(payload)
       onClose()
       return
     }
-    // <<< end minimal fix
 
     onSave(payload, initial?.rrule ? editMode : 'series')
   }
@@ -411,7 +404,7 @@ export default function EventModal({ open, initial, onClose, onSave }: Props) {
               {checklist.length > 0 && (
                 <div className="chips">
                   {checklist.map(t => (
-                    <span className="chip" key={t}>{t}<button className="chip-x" onClick={() => removeBring(t)} aria-label={`Remove {t}`}>×</button></span>
+                    <span className="chip" key={t}>{t}<button className="chip-x" onClick={() => removeBring(t)} aria-label={`Remove ${t}`}>×</button></span>
                   ))}
                 </div>
               )}
