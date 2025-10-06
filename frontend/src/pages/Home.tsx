@@ -11,7 +11,6 @@ export default function Home() {
   const nav = useNavigate()
   const [query, setQuery] = useState('')
 
-  // bump when events/settings/integrations change
   const [version, setVersion] = useState(0)
   useEffect(() => {
     const bump = () => setVersion(v => v + 1)
@@ -52,18 +51,29 @@ export default function Home() {
     const st = DateTime.fromISO(e.start)
     return st > now && st.toISODate() === now.toISODate()
   })
-  const thisWeek = events.filter(e => {
+  const restOfWeek = events.filter(e => {
     const st = DateTime.fromISO(e.start)
     return st.toISODate() !== now.toISODate()
   })
+
+  // group restOfWeek by day
+  const byDay = useMemo(() => {
+    const map = new Map<string, EventRecord[]>()
+    for (const e of restOfWeek) {
+      const key = DateTime.fromISO(e.start).toISODate()!
+      if (!map.has(key)) map.set(key, [])
+      map.get(key)!.push(e)
+    }
+    for (const [, arr] of map) arr.sort((a,b) => a.start.localeCompare(b.start))
+    return Array.from(map.entries())
+      .sort(([a],[b]) => a.localeCompare(b))
+      .map(([k, items]) => ({ day: DateTime.fromISO(`${k}T00:00:00`), items }))
+  }, [restOfWeek])
 
   function Item({ e }: { e: EventRecord }) {
     const sTime = DateTime.fromISO(e.start)
     const eTime = DateTime.fromISO(e.end)
     const timeLabel = `${fmt(sTime, s.timezone, 'HH:mm')}–${fmt(eTime, s.timezone, 'HH:mm')}`
-    const chips: string[] = []
-    if (e.attendees?.length) chips.push(e.attendees.join(', '))
-    if (e.tags?.length) chips.push(e.tags.join(' · '))
     const meta = calendarMetaFor(e)
     return (
       <div style={{ padding: '8px 0', borderTop: '1px solid var(--border)' }}>
@@ -82,11 +92,6 @@ export default function Home() {
             <Link to="/calendar" state={{ jumpTo: e.start }} className="hint">View</Link>
           </div>
         </div>
-        {chips.length > 0 && (
-          <div className="chips" style={{ marginTop: 6 }}>
-            {chips.map((c, i) => <span key={i} className="chip">{c}</span>)}
-          </div>
-        )}
       </div>
     )
   }
@@ -116,8 +121,13 @@ export default function Home() {
 
       <section className="card" style={{ marginTop: 12 }}>
         <h3 style={{ marginTop: 0 }}>This week</h3>
-        {thisWeek.length === 0 && <div className="empty-state"><p>No more events this week.</p></div>}
-        {thisWeek.map(e => <Item key={`${e.id}-${e.start}`} e={e} />)}
+        {byDay.length === 0 && <div className="empty-state"><p>No more events this week.</p></div>}
+        {byDay.map(({ day, items }) => (
+          <div key={day.toISODate()} style={{ marginTop: 8 }}>
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>{day.toFormat('cccc d LLL')}</div>
+            {items.map(e => <Item key={`${e.id}-${e.start}`} e={e} />)}
+          </div>
+        ))}
       </section>
     </div>
   )
