@@ -73,14 +73,14 @@ export function listExpanded(from: DateTime, to: DateTime, query: string): Event
   let externals: EventRecord[] = []
   try { externals = externalExpanded(from, to, query).filter(e => overlaps(e, from, to)) } catch { externals = [] }
 
-  // Apply shadows (replace provider instances when a shadow exists for that occurrence)
+  // Replace external instances with shadows when present
   const sMap = shadowMap()
   const withShadows = externals.map(e => {
     const key = toExtKey(e)
     return (key && sMap.has(key)) ? sMap.get(key)! as EventRecord : e
   })
 
-  // My Agenda OFF → merged window slice, de-duped by (id,start)
+  // My Agenda OFF → union locals + externals/shadows, de-dupe by (id,start)
   if (!featureAuthEnabled() || !myAgendaOn()) {
     const out: EventRecord[] = []
     const seen = new Set<string>()
@@ -92,12 +92,13 @@ export function listExpanded(from: DateTime, to: DateTime, query: string): Event
     return out
   }
 
-  // My Agenda ON
+  // My Agenda ON → locals by linked names + externals mapped to linked members
   const u = currentUser()
   const linkedIds = new Set<string>(u?.linkedMemberIds || [])
   const names = linkedNameCandidates()
 
   const localsFiltered = locals.filter(evt => evtInvolvesNames(evt, names))
+
   const calMap = new Map(listCalendars().map(c => [c.id, new Set(c.assignedMemberIds || [])]))
   const externalsFiltered = withShadows.filter(evt => {
     const id = (evt as any)._calendarId as string | undefined
@@ -129,8 +130,8 @@ function canWrite(u: ReturnType<typeof currentUser>, before: EventRecord | null,
   return false
 }
 
-export function upsertEvent(evt: EventRecord): EventRecord {
-  // External edits route: allow only if that calendar has allowEditLocal=true, otherwise block.
+export function upsertEvent(evt: EventRecord, scope?: 'single'|'following'|'series'): EventRecord {
+  // External edits → only when allowEditLocal=true for that calendar; otherwise block (prevents dupes)
   if (isExternal(evt)) {
     const calId = (evt as any)._calendarId as string | undefined
     const cal = calId ? listCalendars().find(c => c.id === calId) : undefined
@@ -149,10 +150,10 @@ export function upsertEvent(evt: EventRecord): EventRecord {
     }
   }
 
-  // Local edits (and everything else) → baseline with Slice C guards
-  if (!featureAuthEnabled()) { const saved = base.upsertEvent(evt); emitChanged(); return saved }
+  // Local edits (and all non-external) → baseline with Slice C guards
+  if (!featureAuthEnabled()) { const saved = (base as any).upsertEvent(evt, scope); emitChanged(); return saved }
   const u = currentUser()
-  if (!u) { const saved = base.upsertEvent(evt); emitChanged(); return saved }
+  if (!u) { const saved = (base as any).upsertEvent(evt, scope); emitChanged(); return saved }
 
   if (u.role === 'child') { toast('Children cannot change events.'); return evt }
   if (u.role === 'adult') {
@@ -160,18 +161,18 @@ export function upsertEvent(evt: EventRecord): EventRecord {
     const before = all.find(e => e && e.id === evt.id) || null
     if (!canWrite(u, before, evt)) { toast('You can only change events that involve your linked members.'); return evt }
   }
-  const saved = base.upsertEvent(evt); emitChanged(); return saved
+  const saved = (base as any).upsertEvent(evt, scope); emitChanged(); return saved
 }
 
 export function deleteEvent(id: string): void {
-  // If this is a shadow id or represents a shadowed external, remove the shadow (revert)
+  // Shadow delete = revert local edit
   const shadows = readShadows()
   const idx = shadows.findIndex(s => s.id === id || s.shadowOf === id)
   if (idx >= 0) { shadows.splice(idx, 1); writeShadows(shadows); return }
 
-  if (!featureAuthEnabled()) { base.deleteEvent(id); emitChanged(); return }
+  if (!featureAuthEnabled()) { (base as any).deleteEvent(id); emitChanged(); return }
   const u = currentUser()
-  if (!u) { base.deleteEvent(id); emitChanged(); return }
+  if (!u) { (base as any).deleteEvent(id); emitChanged(); return }
 
   if (u.role === 'child') { toast('Children cannot delete events.'); return }
   if (u.role === 'adult') {
@@ -179,7 +180,7 @@ export function deleteEvent(id: string): void {
     const before = all.find(e => e && e.id === id) || null
     if (!canWrite(u, before, null)) { toast('You can only delete events that involve your linked members.'); return }
   }
-  base.deleteEvent(id); emitChanged()
+  (base as any).deleteEvent(id); emitChanged()
 }
 
 export const list      = (base as any).list      as typeof base.list
