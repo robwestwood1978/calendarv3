@@ -4,6 +4,7 @@ import { DateTime } from 'luxon'
 import { listExpanded } from '../state/events-agenda'
 import type { EventRecord } from '../lib/recurrence'
 import { useSettings, pickEventColour } from '../state/settings'
+import '../calendar-hotfix.css'
 
 interface GridProps {
   view: 'day' | '3day' | 'week'
@@ -21,13 +22,11 @@ function toast(msg: string) {
   try { window.dispatchEvent(new CustomEvent('toast', { detail: msg })) } catch {}
 }
 
-/** Safely compute a colour for a local event; never throws. */
 function safePickEventColour(ev: EventRecord, settings: any): string | undefined {
   try {
     const rules = Array.isArray(settings?.colourRules) ? settings.colourRules : []
     const memberLookup = settings?.memberLookup && typeof settings.memberLookup === 'object'
-      ? settings.memberLookup
-      : undefined
+      ? settings.memberLookup : undefined
     if ((!rules || rules.length === 0) && !memberLookup) return undefined
     return pickEventColour(ev, { rules, memberLookup })
   } catch { return undefined }
@@ -67,19 +66,6 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
 
   return (
     <div className="timewrap" style={{ ['--head-h' as any]: '34px' }}>
-      {/* 🔧 Kill any legacy pseudo/overlay in the grid only, and ensure our events sit on top */}
-      <style>{`
-        .timewrap .event::before,
-        .timewrap .event::after { content: none !important; display: none !important; }
-        .timewrap .event [data-overlay],
-        .timewrap .event .overlay,
-        .timewrap .event .pill,
-        .timewrap .event .bg,
-        .timewrap .day-body .event-overlay,
-        .timewrap .day-body .event-ghost { display: none !important; }
-        .timewrap .event { z-index: 1000 !important; }
-      `}</style>
-
       <div className="time-gutter" aria-hidden="true">
         <div className="time-head" />
         {Array.from({ length: 24 }).map((_, h) => (
@@ -110,8 +96,6 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
     </div>
   )
 }
-
-/* ---------------- Day/Week columns with click vs drag ---------------- */
 
 type DragState =
   | { key: string; type: 'move'|'resize'; deltaMin: number; startY: number; moved: boolean }
@@ -173,7 +157,6 @@ function DayColumn({
             if (!prev.moved) {
               onEdit(ev)
             } else if (prev.deltaMin !== 0) {
-              // Commit change (preserve meta + send _prevStart for externals)
               if (type === 'move') {
                 onCommitChange({
                   ...ev,
@@ -210,7 +193,7 @@ function DayColumn({
           position: 'absolute',
           left: 6, right: 6,
           top, height,
-          zIndex: 1000,            // sit above any rogue overlay
+          zIndex: 1000,
           background: '#fff',
           borderRadius: 12,
           boxShadow: '0 2px 10px rgba(0,0,0,0.06)',
@@ -237,7 +220,6 @@ function DayColumn({
           {ev.title}
         </div>
 
-        {/* tiny resize handle */}
         <div
           className="evt-resize"
           onMouseDown={(e) => beginDrag(e, 'resize')}
@@ -264,8 +246,6 @@ function DayColumn({
   )
 }
 
-/* ---------------- Month grid ---------------- */
-
 interface MonthGridProps {
   cursor: DateTime
   query: string
@@ -290,7 +270,7 @@ export function MonthGrid({ cursor, query, onNewAt, onEdit, onMoveOrResize }: Mo
     const delta = s1.diff(s0, 'minutes').minutes
     const updated: EventRecord = {
       ...original,
-      _prevStart: original.start, // important for external moves
+      _prevStart: original.start,
       start: s0.plus({ minutes: delta }).toISO()!,
       end:   e0.plus({ minutes: delta }).toISO()!,
     }
