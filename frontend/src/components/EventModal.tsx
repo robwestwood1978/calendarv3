@@ -214,6 +214,10 @@ export default function EventModal({ open, initial, onClose, onSave }: Props) {
       ...(remindersMin.length ? { remindersMin } : {}),
     } as any
 
+    // If time changed, include previous start so external layer can tombstone old and shadow new
+    const timeChanged = !!initial && (initial.start !== payload.start || initial.end !== payload.end)
+    if (timeChanged) { (payload as any)._prevStart = initial!.start }
+
     // NEW: external events are saved via events-agenda (creates/updates a local shadow if allowed)
     if (initial && isExternal(initial)) {
       upsertAgendaEvent(payload)
