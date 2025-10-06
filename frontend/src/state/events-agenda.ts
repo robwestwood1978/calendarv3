@@ -1,4 +1,3 @@
-// frontend/src/state/events-agenda.ts
 import * as base from './events'
 import type { DateTime } from 'luxon'
 import { DateTime as Lx } from 'luxon'
@@ -12,17 +11,17 @@ const LS_CURRENT   = 'fc_current_user_v1'
 const LS_SETTINGS  = 'fc_settings_v3'
 const LS_MYAGENDA  = 'fc_my_agenda_v1'
 const LS_EVENTS    = 'fc_events_v1'
-const LS_SHADOWS   = 'fc_shadow_events_v1' // local overlays for external instances
+const LS_SHADOWS   = 'fc_shadow_events_v1'
 
 type UserRole = 'parent' | 'adult' | 'child'
 type AnyRec = Record<string, any>
 
 function safeParse<T = any>(raw: string | null): T | null { if (!raw) return null; try { return JSON.parse(raw) as T } catch { return null } }
+function emitChanged() { try { window.dispatchEvent(new CustomEvent('fc:events-changed')) } catch {} }
+function toast(msg: string) { try { window.dispatchEvent(new CustomEvent('toast', { detail: msg })) } catch {} }
+
 function featureAuthEnabled(): boolean { const f = safeParse<any>(localStorage.getItem(LS_FLAGS)); return !!(f && f.authEnabled) }
-function myAgendaOn(): boolean {
-  const v = safeParse<any>(localStorage.getItem(LS_MYAGENDA))
-  return typeof v === 'boolean' ? v : !!(v && v.on)
-}
+function myAgendaOn(): boolean { const v = safeParse<any>(localStorage.getItem(LS_MYAGENDA)); return typeof v === 'boolean' ? v : !!(v && v.on) }
 function currentUser(): null | { id: string; role: UserRole; linkedMemberIds: string[] } {
   const id = localStorage.getItem(LS_CURRENT)
   if (!id) return null
@@ -61,40 +60,31 @@ function overlaps(evt: EventRecord, from: DateTime, to: DateTime): boolean {
   if (!s.isValid || !e.isValid) return false
   return s <= to && e >= from
 }
-function emitChanged() { try { window.dispatchEvent(new CustomEvent('fc:events-changed')) } catch {} }
-function toast(msg: string) { try { window.dispatchEvent(new CustomEvent('toast', { detail: msg })) } catch {} }
 
-// ---- Shadows ----
+// ---- Shadows (local overlays for external instances) ----
 type Shadow = EventRecord & { source: 'shadow', extKey: string, shadowOf: string, shadowAt: string }
 function readShadows(): Shadow[] { return safeParse<Shadow[]>(localStorage.getItem(LS_SHADOWS)) || [] }
-function writeShadows(arr: Shadow[]) { localStorage.setItem(LS_SHADOWS, JSON.stringify(arr)) }
-function shadowMap(): Map<string, Shadow> {
-  const map = new Map<string, Shadow>()
-  for (const s of readShadows()) map.set(s.extKey, s)
-  return map
-}
+function writeShadows(arr: Shadow[]) { localStorage.setItem(LS_SHADOWS, JSON.stringify(arr)); emitChanged() }
+function shadowMap(): Map<string, Shadow> { const map = new Map<string, Shadow>(); for (const s of readShadows()) map.set(s.extKey, s); return map }
 
 // ---------- FILTERED READS ----------
 export function listExpanded(from: DateTime, to: DateTime, query: string): EventRecord[] {
-  const locals = (base as any).listExpanded(from, to, query) as EventRecord[]
-  const localsClipped = locals.filter(e => overlaps(e, from, to))
-
+  const locals = (base.listExpanded(from, to, query) as EventRecord[]).filter(e => overlaps(e, from, to))
   let externals: EventRecord[] = []
   try { externals = externalExpanded(from, to, query).filter(e => overlaps(e, from, to)) } catch { externals = [] }
 
-  // Apply local shadow overlays
+  // Apply shadows (replace provider instances when a shadow exists for that occurrence)
   const sMap = shadowMap()
-  const externalsWithShadow = externals.map(e => {
+  const withShadows = externals.map(e => {
     const key = toExtKey(e)
-    if (key && sMap.has(key)) return sMap.get(key)! as EventRecord
-    return e
+    return (key && sMap.has(key)) ? sMap.get(key)! as EventRecord : e
   })
 
-  // My Agenda OFF (or auth OFF): union + dedupe by (id,start)
+  // My Agenda OFF → merged window slice, de-duped by (id,start)
   if (!featureAuthEnabled() || !myAgendaOn()) {
     const out: EventRecord[] = []
     const seen = new Set<string>()
-    for (const e of [...localsClipped, ...externalsWithShadow]) {
+    for (const e of [...locals, ...withShadows]) {
       const key = `${e.id}@@${e.start}`
       if (seen.has(key)) continue
       seen.add(key); out.push(e)
@@ -103,24 +93,13 @@ export function listExpanded(from: DateTime, to: DateTime, query: string): Event
   }
 
   // My Agenda ON
-  const u = currentUser(); if (!u) {
-    const out: EventRecord[] = []
-    const seen = new Set<string>()
-    for (const e of [...localsClipped, ...externalsWithShadow]) {
-      const key = `${e.id}@@${e.start}`
-      if (seen.has(key)) continue
-      seen.add(key); out.push(e)
-    }
-    return out
-  }
-
-  const linkedIds = new Set<string>((u.linkedMemberIds || []) as string[])
+  const u = currentUser()
+  const linkedIds = new Set<string>(u?.linkedMemberIds || [])
   const names = linkedNameCandidates()
 
-  const localsFiltered = localsClipped.filter(evt => evtInvolvesNames(evt, names))
-
+  const localsFiltered = locals.filter(evt => evtInvolvesNames(evt, names))
   const calMap = new Map(listCalendars().map(c => [c.id, new Set(c.assignedMemberIds || [])]))
-  const externalsFiltered = externalsWithShadow.filter(evt => {
+  const externalsFiltered = withShadows.filter(evt => {
     const id = (evt as any)._calendarId as string | undefined
     if (!id) return false
     const set = calMap.get(id); if (!set) return false
@@ -128,7 +107,6 @@ export function listExpanded(from: DateTime, to: DateTime, query: string): Event
     return false
   })
 
-  // Union with (id,start) key to keep all recurring occurrences
   const out: EventRecord[] = []
   const seen = new Set<string>()
   for (const e of [...localsFiltered, ...externalsFiltered]) {
@@ -152,28 +130,29 @@ function canWrite(u: ReturnType<typeof currentUser>, before: EventRecord | null,
 }
 
 export function upsertEvent(evt: EventRecord): EventRecord {
-  // External → shadow (if calendar allows). If not allowed, fall through to base (no-op for externals).
+  // External edits route: allow only if that calendar has allowEditLocal=true, otherwise block.
   if (isExternal(evt)) {
     const calId = (evt as any)._calendarId as string | undefined
-    const calendars = listCalendars()
-    const cal = calId ? calendars.find(c => c.id === calId) : undefined
-    if (cal && cal.allowEditLocal) {
-      const key = toExtKey(evt)
-      if (key) {
-        const shadows = readShadows()
-        const baseShadow: Shadow = { ...(evt as any), source: 'shadow', extKey: key, shadowOf: String(evt.id), shadowAt: new Date().toISOString() }
-        const idx = shadows.findIndex(s => s.extKey === key)
-        if (idx >= 0) shadows[idx] = baseShadow; else shadows.push(baseShadow)
-        writeShadows(shadows)
-        emitChanged()
-        return evt
-      }
+    const cal = calId ? listCalendars().find(c => c.id === calId) : undefined
+    if (!cal || !cal.allowEditLocal) {
+      toast('This event is from an external calendar. Enable “Allow editing (local)” in Integrations to edit it.')
+      return evt
+    }
+    const key = toExtKey(evt)
+    if (key) {
+      const shadows = readShadows()
+      const baseShadow: Shadow = { ...(evt as any), source: 'shadow', extKey: key, shadowOf: String(evt.id), shadowAt: new Date().toISOString() }
+      const idx = shadows.findIndex(s => s.extKey === key)
+      if (idx >= 0) shadows[idx] = baseShadow; else shadows.push(baseShadow)
+      writeShadows(shadows)
+      return evt
     }
   }
 
-  if (!featureAuthEnabled()) return (base as any).upsertEvent(evt)
+  // Local edits (and everything else) → baseline with Slice C guards
+  if (!featureAuthEnabled()) { const saved = base.upsertEvent(evt); emitChanged(); return saved }
   const u = currentUser()
-  if (!u) return (base as any).upsertEvent(evt)
+  if (!u) { const saved = base.upsertEvent(evt); emitChanged(); return saved }
 
   if (u.role === 'child') { toast('Children cannot change events.'); return evt }
   if (u.role === 'adult') {
@@ -181,18 +160,18 @@ export function upsertEvent(evt: EventRecord): EventRecord {
     const before = all.find(e => e && e.id === evt.id) || null
     if (!canWrite(u, before, evt)) { toast('You can only change events that involve your linked members.'); return evt }
   }
-  const saved = (base as any).upsertEvent(evt); emitChanged(); return saved
+  const saved = base.upsertEvent(evt); emitChanged(); return saved
 }
 
 export function deleteEvent(id: string): void {
-  // If this is a shadow id reference, allow "revert local edit" by removing shadow
+  // If this is a shadow id or represents a shadowed external, remove the shadow (revert)
   const shadows = readShadows()
   const idx = shadows.findIndex(s => s.id === id || s.shadowOf === id)
-  if (idx >= 0) { shadows.splice(idx, 1); writeShadows(shadows); emitChanged(); return }
+  if (idx >= 0) { shadows.splice(idx, 1); writeShadows(shadows); return }
 
-  if (!featureAuthEnabled()) { (base as any).deleteEvent(id); return }
+  if (!featureAuthEnabled()) { base.deleteEvent(id); emitChanged(); return }
   const u = currentUser()
-  if (!u) { (base as any).deleteEvent(id); return }
+  if (!u) { base.deleteEvent(id); emitChanged(); return }
 
   if (u.role === 'child') { toast('Children cannot delete events.'); return }
   if (u.role === 'adult') {
@@ -200,19 +179,11 @@ export function deleteEvent(id: string): void {
     const before = all.find(e => e && e.id === id) || null
     if (!canWrite(u, before, null)) { toast('You can only delete events that involve your linked members.'); return }
   }
-  ;(base as any).deleteEvent(id); emitChanged()
+  base.deleteEvent(id); emitChanged()
 }
 
-// ---------- SAFE PASS-THROUGHS (avoid hard imports of non-existent named exports) ----------
-export const list: any = typeof (base as any).list === 'function'
-  ? (base as any).list
-  : (_from: DateTime, _to: DateTime, q: string) => (base as any).listExpanded(_from, _to, q)
-
-export const listRange: any = typeof (base as any).listRange === 'function'
-  ? (base as any).listRange
-  : (_from: DateTime, _to: DateTime) => (base as any).list(_from, _to, '')
-
-// Re-export everything else unchanged (safe namespace re-export via 'any')
+export const list      = (base as any).list      as typeof base.list
+export const listRange = (base as any).listRange as typeof base.listRange
 export * from './events'
 
 // Reactive bridge
