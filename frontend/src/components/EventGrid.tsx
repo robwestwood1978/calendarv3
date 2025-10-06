@@ -14,6 +14,7 @@ interface GridProps {
 }
 
 const SNAP_MINUTES = 15
+const DRAG_THRESHOLD_PX = 3 // if mouse moves less than this, treat as click
 
 function toast(msg: string) {
   try { window.dispatchEvent(new CustomEvent('toast', { detail: msg })) } catch {}
@@ -87,11 +88,10 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
   )
 }
 
-/* ---------------- Day/Week columns with live preview ---------------- */
+/* ---------------- Day/Week columns with click vs drag ---------------- */
 
 type DragState =
-  | { key: string; type: 'move'; deltaMin: number }
-  | { key: string; type: 'resize'; deltaMin: number }
+  | { key: string; type: 'move'|'resize'; deltaMin: number; startY: number; moved: boolean }
   | null
 
 function DayColumn({
@@ -126,48 +126,45 @@ function DayColumn({
     const top = (s.diff(dayStart, 'minutes').minutes / 60) * hourHeight
     const height = (e.diff(s, 'minutes').minutes / 60) * hourHeight
 
-    // Colours: calendar tint takes precedence; fall back to rule colour; else theme
     const ruleColour = safePickEventColour(ev, settings)
     const colour = (ev as any)._calendarColor || ruleColour || 'var(--primary)'
 
-    const startDrag = (md: React.MouseEvent) => {
+    const beginDrag = (md: React.MouseEvent, type: 'move'|'resize') => {
       md.stopPropagation(); md.preventDefault()
       const startY = md.clientY
-      setDrag({ key, type: 'move', deltaMin: 0 })
-      const onMoveDoc = (mm: MouseEvent) => setDrag(prev => (prev && prev.key === key && prev.type === 'move')
-        ? { ...prev, deltaMin: snapDelta(mm.clientY - startY) }
-        : prev)
-      const onUpDoc = () => {
-        window.removeEventListener('mousemove', onMoveDoc)
-        window.removeEventListener('mouseup', onUpDoc)
-        setDrag(prev => {
-          if (prev && prev.key === key && prev.type === 'move' && prev.deltaMin !== 0) {
-            onCommitChange({ ...ev, start: s0.plus({ minutes: prev.deltaMin }).toISO()!, end: e0.plus({ minutes: prev.deltaMin }).toISO()! })
-          }
-          return null
-        })
-      }
-      window.addEventListener('mousemove', onMoveDoc); window.addEventListener('mouseup', onUpDoc)
-    }
+      setDrag({ key, type, deltaMin: 0, startY, moved: false })
 
-    const startResize = (md: React.MouseEvent) => {
-      md.stopPropagation(); md.preventDefault()
-      const startY = md.clientY
-      setDrag({ key, type: 'resize', deltaMin: 0 })
-      const onMoveDoc = (mm: MouseEvent) => setDrag(prev => (prev && prev.key === key && prev.type === 'resize')
-        ? { ...prev, deltaMin: snapDelta(mm.clientY - startY) }
-        : prev)
+      const onMoveDoc = (mm: MouseEvent) => {
+        const dy = mm.clientY - startY
+        const moved = Math.abs(dy) > DRAG_THRESHOLD_PX
+        setDrag(prev => (prev && prev.key === key && prev.type === type)
+          ? { ...prev, deltaMin: snapDelta(dy), moved }
+          : prev)
+      }
+
       const onUpDoc = () => {
         window.removeEventListener('mousemove', onMoveDoc)
         window.removeEventListener('mouseup', onUpDoc)
         setDrag(prev => {
-          if (prev && prev.key === key && prev.type === 'resize' && prev.deltaMin !== 0) {
-            onCommitChange({ ...ev, end: e0.plus({ minutes: prev.deltaMin }).toISO()! })
+          if (prev && prev.key === key && prev.type === type) {
+            if (!prev.moved) {
+              // Treat as click
+              onEdit(ev)
+            } else if (prev.deltaMin !== 0) {
+              // Commit change
+              if (type === 'move') {
+                onCommitChange({ ...ev, start: s0.plus({ minutes: prev.deltaMin }).toISO()!, end: e0.plus({ minutes: prev.deltaMin }).toISO()! })
+              } else {
+                onCommitChange({ ...ev, end: e0.plus({ minutes: prev.deltaMin }).toISO()! })
+              }
+            }
           }
           return null
         })
       }
-      window.addEventListener('mousemove', onMoveDoc); window.addEventListener('mouseup', onUpDoc)
+
+      window.addEventListener('mousemove', onMoveDoc)
+      window.addEventListener('mouseup', onUpDoc)
     }
 
     const isPreviewing = !!(drag && drag.key === key)
@@ -176,11 +173,10 @@ function DayColumn({
       <div
         key={key}
         className="event"
-        onDoubleClick={() => onEdit(ev)}
-        onMouseDown={startDrag}
         role="button"
+        onMouseDown={(e) => beginDrag(e, 'move')}
         style={{
-          position: 'absolute',               // ✅ FIX: layer events above the grid
+          position: 'absolute',
           left: 6, right: 6,
           top, height,
           zIndex: 2,
@@ -189,18 +185,29 @@ function DayColumn({
           boxShadow: '0 2px 10px rgba(0,0,0,0.06)',
           borderLeft: `3px solid ${colour}`,
           padding: '6px 8px 10px 8px',
-          cursor: 'grab',
-          opacity: isPreviewing ? 0.9 : 1,
+          cursor: 'pointer',
+          opacity: isPreviewing ? 0.95 : 1,
           userSelect: 'none',
         }}
       >
-        <div className="evt-title" style={{ fontWeight: 600, fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        <div
+          className="evt-title"
+          style={{
+            fontWeight: 600, fontSize: 13,
+            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+            color: 'var(--text, #0f172a)',
+          }}
+          // Safety: also open on simple click (some mice don't move enough to register a 'drag end')
+          onClick={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => { e.stopPropagation(); onEdit(ev) }}
+        >
           {ev.title}
         </div>
+
         {/* tiny resize handle */}
         <div
           className="evt-resize"
-          onMouseDown={startResize}
+          onMouseDown={(e) => beginDrag(e, 'resize')}
           style={{
             position: 'absolute',
             left: 8, right: 8, bottom: 2,
@@ -225,7 +232,7 @@ function DayColumn({
   )
 }
 
-/* ---------------- Month grid (drag without overlay) ---------------- */
+/* ---------------- Month grid (click to open; drag to move) ---------------- */
 
 interface MonthGridProps {
   cursor: DateTime
@@ -257,14 +264,14 @@ export function MonthGrid({ cursor, query, onNewAt, onEdit, onMoveOrResize }: Mo
       {days.map((day, i) => {
         const todays = eventsForDay(day)
         const allDay = todays.filter(e => e.allDay)
-        const timed   = todays.filter(e => !e.allDay).slice(0, 3)
+        const timed   = todays.filter(e => !e.allDay)
 
         return (
           <div
             key={day.toISODate()}
             className={`mcell ${day.hasSame(cursor, 'month') ? '' : 'dim'}`}
             onDoubleClick={() => onNewAt(day.set({ hour: 9, minute: 0 }))}
-            onDragOver={(ev) => ev.preventDefault()}             // ✅ attach to cell; no overlay
+            onDragOver={(ev) => ev.preventDefault()}
             onDrop={(ev) => {
               ev.preventDefault()
               try {
@@ -276,23 +283,38 @@ export function MonthGrid({ cursor, query, onNewAt, onEdit, onMoveOrResize }: Mo
             style={{ position: 'relative' }}
           >
             <div className="mhead">{i < 7 ? day.toFormat('ccc d LLL') : day.toFormat('d')}</div>
-            <div className="mitems">
+            <div className="mitems" style={{ display:'grid', gap: 2 }}>
               {allDay.map(e => (
-                <div key={`${e.id}-${e.start}-a`} className="mall" onDoubleClick={() => onEdit(e)}>
-                  <span className="dot" style={{ background: (e as any)._calendarColor || 'var(--primary)' }} /> {e.title}
-                </div>
-              ))}
-              {timed.map(e => (
-                <div
-                  key={`${e.id}-${e.start}-t`}
-                  className="mtimed"
+                <button
+                  key={`${e.id}-${e.start}-a`}
+                  className="mall"
+                  onClick={() => onEdit(e)}
                   draggable
                   onDragStart={(ev) => { ev.dataTransfer.setData('text/plain', JSON.stringify(e)) }}
-                  onDoubleClick={() => onEdit(e)}
+                  style={{
+                    display:'flex', alignItems:'center', gap:6,
+                    background:'transparent', border:0, textAlign:'left', padding:2, cursor:'pointer'
+                  }}
                 >
-                  <span className="dot" style={{ background: (e as any)._calendarColor || 'var(--primary)' }} />
-                  {DateTime.fromISO(e.start).toFormat('HH:mm')} {e.title}
-                </div>
+                  <span className="dot" style={{ width:8, height:8, borderRadius:999, background: (e as any)._calendarColor || 'var(--primary)' }} />
+                  <span>{e.title}</span>
+                </button>
+              ))}
+              {timed.map(e => (
+                <button
+                  key={`${e.id}-${e.start}-t`}
+                  className="mtimed"
+                  onClick={() => onEdit(e)}
+                  draggable
+                  onDragStart={(ev) => { ev.dataTransfer.setData('text/plain', JSON.stringify(e)) }}
+                  style={{
+                    display:'flex', alignItems:'center', gap:6,
+                    background:'transparent', border:0, textAlign:'left', padding:2, cursor:'pointer'
+                  }}
+                >
+                  <span className="dot" style={{ width:8, height:8, borderRadius:999, background: (e as any)._calendarColor || 'var(--primary)' }} />
+                  <span>{DateTime.fromISO(e.start).toFormat('HH:mm')} {e.title}</span>
+                </button>
               ))}
             </div>
           </div>
