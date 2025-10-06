@@ -26,20 +26,25 @@ function toast(msg: string) {
 function safePickEventColour(ev: EventRecord, settings: any): string | undefined {
   try {
     const rules = Array.isArray(settings?.colourRules) ? settings.colourRules : []
-    const memberLookup = (settings && settings.memberLookup && typeof settings.memberLookup === 'object') ? settings.memberLookup : {}
-    const memberNames = Array.isArray((ev as any).attendees) ? (ev as any).attendees : []
-    const tags = Array.isArray((ev as any).tags) ? (ev as any).tags : []
-    const baseColour = (ev as any).colour
-    return pickEventColour({ baseColour, memberNames, tags, rules, memberLookup })
-  } catch { return undefined }
+    const memberLookup = settings?.memberLookup && typeof settings.memberLookup === 'object'
+      ? settings.memberLookup : undefined
+    if ((!rules || rules.length === 0) && !memberLookup) return (ev as any).colour
+
+    return pickEventColour({
+      baseColour: (ev as any).colour,
+      memberNames: Array.isArray((ev as any).attendees) ? (ev as any).attendees : [],
+      tags: Array.isArray((ev as any).tags) ? (ev as any).tags : [],
+      rules,
+      memberLookup: memberLookup || {}
+    })
+  } catch { return (ev as any).colour }
 }
 
-// Choose readable text color (white/ink) for a given hex color (fallback to white).
+// Choose readable text color (white vs dark ink) for a given hex color.
 function idealTextColor(bg: string | undefined): string {
   if (!bg) return '#fff'
-  // if CSS var or non-hex, default to white text (works for primary blues/greens)
   if (!/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(bg)) return '#fff'
-  let r, g, b;
+  let r:number, g:number, b:number;
   if (bg.length === 4) {
     r = parseInt(bg[1]+bg[1],16)
     g = parseInt(bg[2]+bg[2],16)
@@ -96,31 +101,21 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
         ))}
       </div>
 
-      <div className="grid-days">
-        <div className="time-head row" />
-        {cols.map((d) => (
-          <div key={d.toISODate()} className="day-col">
+      <div className="grid-days" style={{ gridTemplateColumns: `repeat(${days}, 1fr)` }}>
+        {cols.map(d => (
+          <div key={d.toISODate()} className="day-col" onDoubleClick={e => onBackgroundDoubleClick(e, d)}>
             <div className="day-head">
-              <div className="day-name">{d.toFormat('EEE')}</div>
+              <div className="day-name">{d.toFormat('ccc')}</div>
               <div className="day-date">{d.toFormat('d LLL')}</div>
             </div>
-            <div
-              className="day-body"
-              onDoubleClick={(e) => onBackgroundDoubleClick(e, d)}
-              style={{ height: `${24 * hourHeight}px` }}
-            >
-              <DayEvents
-                day={d}
-                hourHeight={hourHeight}
-                events={safeEvents}
-                onEdit={onEdit}
-                onCommitChange={onMoveOrResize}
-                settings={settings}
-              />
-              {Array.from({ length: 24 }).map((_, h) => (
-                <div key={h} className="hour-row" style={{ height: `${hourHeight}px` }} />
-              ))}
-            </div>
+            <DayColumn
+              day={d}
+              hourHeight={hourHeight}
+              events={safeEvents.filter(e => DateTime.fromISO(e.start).hasSame(d, 'day') && !e.allDay)}
+              onEdit={onEdit}
+              onCommitChange={(ev) => { onMoveOrResize(ev); toast('Saved'); }}
+              settings={settings}
+            />
           </div>
         ))}
       </div>
@@ -129,12 +124,11 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
 }
 
 type DragState =
+  | { key: string; type: 'move'|'resize'; deltaMin: number; startY: number; moved: boolean }
   | null
-  | { key: string; type: 'move'; deltaMin: number; startY: number; moved: boolean }
-  | { key: string; type: 'resize'; deltaMin: number; startY: number; moved: boolean }
 
-function DayEvents({
-  day, hourHeight, events, onEdit, onCommitChange, settings
+function DayColumn({
+  day, hourHeight, events, onEdit, onCommitChange, settings,
 }: {
   day: DateTime
   hourHeight: number
@@ -268,9 +262,7 @@ function DayEvents({
     )
   }
 
-  const eventsForDay = (d: DateTime) => events.filter(e => DateTime.fromISO(e.start).hasSame(d, 'day'))
-
-  return <>{eventsForDay(day).map(renderEvt)}</>
+  return <>{events.map(renderEvt)}</>
 }
 
 export function MonthGrid({ cursor, query, onNewAt, onEdit, onMoveOrResize }: {
