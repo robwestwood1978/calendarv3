@@ -4,6 +4,7 @@ import { DateTime } from 'luxon'
 import EventModal from '../components/EventModal'
 import { TimeGrid, MonthGrid } from '../components/EventGrid'
 import { upsertEvent, deleteEvent } from '../state/events-agenda'
+import CalendarLegend from '../components/calendar/CalendarLegend'
 import type { EventRecord } from '../lib/recurrence'
 
 type View = 'day' | '3day' | 'week' | 'month'
@@ -79,6 +80,7 @@ export default function CalendarPage() {
   return (
     <div className="calendar-page" data-v={version}>
       <header className="toolbar">
+        <CalendarLegend />
         <div className="left">
           <button onClick={prev} title="Previous">‹</button>
           <button onClick={today} title="Today">Today</button>
