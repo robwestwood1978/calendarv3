@@ -1,4 +1,5 @@
-import React, { useState } from 'react'
+// frontend/src/components/EventGrid.tsx
+import React, { useMemo, useState } from 'react'
 import { DateTime } from 'luxon'
 import { listExpanded } from '../state/events-agenda'
 import type { EventRecord } from '../lib/recurrence'
@@ -14,7 +15,7 @@ interface GridProps {
 }
 
 const SNAP_MINUTES = 15
-const DRAG_THRESHOLD_PX = 3 // if mouse moves less than this, treat as click
+const DRAG_THRESHOLD_PX = 3
 
 function toast(msg: string) {
   try { window.dispatchEvent(new CustomEvent('toast', { detail: msg })) } catch {}
@@ -29,9 +30,7 @@ function safePickEventColour(ev: EventRecord, settings: any): string | undefined
       : undefined
     if ((!rules || rules.length === 0) && !memberLookup) return undefined
     return pickEventColour(ev, { rules, memberLookup })
-  } catch {
-    return undefined
-  }
+  } catch { return undefined }
 }
 
 export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize }: GridProps) {
@@ -41,11 +40,22 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
   const start = view === 'week' ? cursor.startOf('week') : cursor
   const days = view === '3day' ? 3 : view === 'day' ? 1 : 7
   const end = start.plus({ days })
+  const cols = useMemo(() => Array.from({ length: days }, (_, i) => start.plus({ days: i })), [start.toISODate(), days])
 
-  const events = listExpanded(start.startOf('day'), end.endOf('day'), query)
-  const safeEvents = events.filter(e => DateTime.fromISO(e.start).isValid && DateTime.fromISO(e.end).isValid)
-
-  const cols = Array.from({ length: days }, (_, i) => start.plus({ days: i }))
+  // Expand + validate + dedupe (id@start)
+  const safeEvents = useMemo(() => {
+    const data = listExpanded(start.startOf('day'), end.endOf('day'), query)
+      .filter(e => DateTime.fromISO(e.start).isValid && DateTime.fromISO(e.end).isValid)
+    const out: EventRecord[] = []
+    const seen = new Set<string>()
+    for (const e of data) {
+      const key = `${e.id}@@${e.start}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(e)
+    }
+    return out
+  }, [start.toISO(), end.toISO(), query])
 
   const onBackgroundDoubleClick = (e: React.MouseEvent, day: DateTime) => {
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
@@ -57,6 +67,12 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
 
   return (
     <div className="timewrap" style={{ ['--head-h' as any]: '34px' }}>
+      {/* Hard override to remove any legacy pseudo-element overlays on events */}
+      <style>{`
+        .timewrap .event::before,
+        .timewrap .event::after { content: none !important; display: none !important; }
+      `}</style>
+
       <div className="time-gutter" aria-hidden="true">
         <div className="time-head" />
         {Array.from({ length: 24 }).map((_, h) => (
@@ -78,7 +94,7 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
               hourHeight={hourHeight}
               events={safeEvents.filter(e => DateTime.fromISO(e.start).hasSame(d, 'day') && !e.allDay)}
               onEdit={onEdit}
-              onCommitChange={(ev) => { onNewAt; onMoveOrResize(ev); toast('Saved'); }}
+              onCommitChange={(ev) => { onMoveOrResize(ev); toast('Saved'); }}
               settings={settings}
             />
           </div>
@@ -151,7 +167,7 @@ function DayColumn({
               // Treat as click
               onEdit(ev)
             } else if (prev.deltaMin !== 0) {
-              // Commit change — include _prevStart so state layer can tombstone+shadow external items
+              // Commit change (preserve meta + send _prevStart for externals)
               if (type === 'move') {
                 onCommitChange({
                   ...ev,
@@ -188,20 +204,22 @@ function DayColumn({
           position: 'absolute',
           left: 6, right: 6,
           top, height,
-          zIndex: 2,
+          zIndex: 5,               // make sure we sit above any stray overlays
           background: '#fff',
-          borderRadius: 10,
+          borderRadius: 12,
           boxShadow: '0 2px 10px rgba(0,0,0,0.06)',
           borderLeft: `3px solid ${colour}`,
           padding: '6px 8px 10px 8px',
           cursor: 'pointer',
           opacity: isPreviewing ? 0.95 : 1,
           userSelect: 'none',
+          overflow: 'hidden',
         }}
       >
         <div
           className="evt-title"
           style={{
+            position: 'relative', zIndex: 2, // sit above any lingering pseudo-elements
             fontWeight: 600, fontSize: 13,
             whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
             color: 'var(--text, #0f172a)',
@@ -218,8 +236,8 @@ function DayColumn({
           onMouseDown={(e) => beginDrag(e, 'resize')}
           style={{
             position: 'absolute',
-            left: 8, right: 8, bottom: 2,
-            height: 6, borderRadius: 3,
+            left: 8, right: 8, bottom: 4,
+            height: 6, borderRadius: 999,
             background: 'rgba(0,0,0,0.08)',
             cursor: 'ns-resize',
           }}
@@ -230,9 +248,11 @@ function DayColumn({
 
   return (
     <div className="day-body" style={{ position: 'relative' }}>
+      {/* hour rows */}
       {Array.from({ length: 24 }).map((_, h) => (
         <div key={h} className="hour-row" style={{ height: `${hourHeight}px`, borderTop: '1px solid #eef2f7' }} />
       ))}
+      {/* events */}
       {events.map(renderEvt)}
     </div>
   )
@@ -253,7 +273,8 @@ export function MonthGrid({ cursor, query, onNewAt, onEdit, onMoveOrResize }: Mo
   const days = Array.from({ length: 42 }, (_, i) => start.plus({ days: i }))
   const end = days[days.length - 1].endOf('day')
 
-  const events = listExpanded(start, end, query).filter(e => DateTime.fromISO(e.start).isValid && DateTime.fromISO(e.end).isValid)
+  const events = listExpanded(start, end, query)
+    .filter(e => DateTime.fromISO(e.start).isValid && DateTime.fromISO(e.end).isValid)
 
   const eventsForDay = (d: DateTime) => events.filter(e => DateTime.fromISO(e.start).hasSame(d, 'day'))
 
@@ -263,11 +284,11 @@ export function MonthGrid({ cursor, query, onNewAt, onEdit, onMoveOrResize }: Mo
     const delta = s1.diff(s0, 'minutes').minutes
     const updated: EventRecord = {
       ...original,
-      _prevStart: original.start,                // <-- include previous start
+      _prevStart: original.start, // important for external moves
       start: s0.plus({ minutes: delta }).toISO()!,
       end:   e0.plus({ minutes: delta }).toISO()!,
-    } as any
-    if (onMoveOrResize) onMoveOrResize(updated)
+    }
+    onMoveOrResize && onMoveOrResize(updated)
   }
 
   return (
