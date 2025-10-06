@@ -78,7 +78,7 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
               hourHeight={hourHeight}
               events={safeEvents.filter(e => DateTime.fromISO(e.start).hasSame(d, 'day') && !e.allDay)}
               onEdit={onEdit}
-              onCommitChange={(ev) => { onMoveOrResize(ev); toast('Saved'); }}
+              onCommitChange={(ev) => { onNewAt; onMoveOrResize(ev); toast('Saved'); }}
               settings={settings}
             />
           </div>
@@ -151,11 +151,20 @@ function DayColumn({
               // Treat as click
               onEdit(ev)
             } else if (prev.deltaMin !== 0) {
-              // Commit change
+              // Commit change — include _prevStart so state layer can tombstone+shadow external items
               if (type === 'move') {
-                onCommitChange({ ...ev, start: s0.plus({ minutes: prev.deltaMin }).toISO()!, end: e0.plus({ minutes: prev.deltaMin }).toISO()! })
+                onCommitChange({
+                  ...ev,
+                  _prevStart: ev.start,
+                  start: s0.plus({ minutes: prev.deltaMin }).toISO()!,
+                  end:   e0.plus({ minutes: prev.deltaMin }).toISO()!,
+                } as any)
               } else {
-                onCommitChange({ ...ev, end: e0.plus({ minutes: prev.deltaMin }).toISO()! })
+                onCommitChange({
+                  ...ev,
+                  _prevStart: ev.start,
+                  end: e0.plus({ minutes: prev.deltaMin }).toISO()!,
+                } as any)
               }
             }
           }
@@ -197,7 +206,6 @@ function DayColumn({
             whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
             color: 'var(--text, #0f172a)',
           }}
-          // Safety: also open on simple click (some mice don't move enough to register a 'drag end')
           onClick={(e) => e.stopPropagation()}
           onDoubleClick={(e) => { e.stopPropagation(); onEdit(ev) }}
         >
@@ -222,11 +230,9 @@ function DayColumn({
 
   return (
     <div className="day-body" style={{ position: 'relative' }}>
-      {/* hour rows */}
       {Array.from({ length: 24 }).map((_, h) => (
         <div key={h} className="hour-row" style={{ height: `${hourHeight}px`, borderTop: '1px solid #eef2f7' }} />
       ))}
-      {/* events */}
       {events.map(renderEvt)}
     </div>
   )
@@ -255,7 +261,12 @@ export function MonthGrid({ cursor, query, onNewAt, onEdit, onMoveOrResize }: Mo
     const s0 = DateTime.fromISO(original.start); const e0 = DateTime.fromISO(original.end)
     const s1 = newDay.set({ hour: s0.hour, minute: s0.minute })
     const delta = s1.diff(s0, 'minutes').minutes
-    const updated: EventRecord = { ...original, start: s0.plus({ minutes: delta }).toISO()!, end: e0.plus({ minutes: delta }).toISO()! }
+    const updated: EventRecord = {
+      ...original,
+      _prevStart: original.start,                // <-- include previous start
+      start: s0.plus({ minutes: delta }).toISO()!,
+      end:   e0.plus({ minutes: delta }).toISO()!,
+    } as any
     if (onMoveOrResize) onMoveOrResize(updated)
   }
 
