@@ -1,9 +1,16 @@
-// frontend/src/components/EventModal.tsx
 import React, { useEffect, useMemo, useState } from 'react'
 import { DateTime, Duration } from 'luxon'
 import { useSettings } from '../state/settings'
 import type { EventRecord } from '../lib/recurrence'
-import { deleteEvent } from '../state/events'
+
+// Local (baseline) delete for your own events/series logic
+import { deleteEvent as deleteLocalEvent } from '../state/events'
+
+// NEW: state layer that handles shadows for external events
+import { upsertEvent as upsertAgendaEvent, deleteEvent as deleteAgendaEvent } from '../state/events-agenda'
+
+// NEW: helpers to detect external/shadow + fetch calendar meta (name/colour)
+import { calendarMetaFor, isExternal, isShadow } from '../lib/external'
 
 export type RepeatFreq = 'none' | 'daily' | 'weekly' | 'monthly' | 'yearly'
 
@@ -24,12 +31,17 @@ const DUR_PRESETS = [
 ]
 const isEmail = (s: string) => /\S+@\S+\.\S+/.test(s)
 
-type MonthlyMode = 'date' | 'weekday'   // 25th vs 3rd Wednesday
-type YearlyMode  = 'date' | 'weekday'   // same as above but fixed to the original month
+type MonthlyMode = 'date' | 'weekday'
+type YearlyMode  = 'date' | 'weekday'
 
 export default function EventModal({ open, initial, onClose, onSave }: Props) {
   const settings = useSettings()
   const { tags: presetTags, bringPresets, members, defaults, timezone } = settings
+
+  // ------- NEW: external/shadow metadata for header badge -------
+  const meta = useMemo(() => calendarMetaFor(initial), [initial])
+  const external = !!(initial && isExternal(initial))
+  const shadow = !!(initial && isShadow(initial))
 
   // core
   const [title, setTitle] = useState('')
@@ -108,7 +120,6 @@ export default function EventModal({ open, initial, onClose, onSave }: Props) {
       const c = up.match(/COUNT=(\d+)/)
       setCount(c ? Math.max(1, parseInt(c[1], 10)) : 10)
 
-      // infer monthly/yearly mode heuristically
       setMonthlyMode(/BYDAY=/.test(up) ? 'weekday' : 'date')
       setYearlyMode(/BYDAY=/.test(up) ? 'weekday' : 'date')
 
@@ -160,10 +171,8 @@ export default function EventModal({ open, initial, onClose, onSave }: Props) {
 
     if (repeat === 'monthly') {
       if (monthlyMode === 'date') {
-        // Same day-of-month (e.g., 25th)
-        // no BYDAY; the DTSTART day controls it
+        // same day-of-month (DRIVEN BY DTSTART)
       } else {
-        // “Nth weekday” pattern (e.g., 3rd Wednesday)
         parts.push(`BYDAY=${weekdayCode(dtStart)}`)
         parts.push(`BYSETPOS=${nthInMonth(dtStart)}`)
       }
@@ -174,8 +183,6 @@ export default function EventModal({ open, initial, onClose, onSave }: Props) {
       if (yearlyMode === 'weekday') {
         parts.push(`BYDAY=${weekdayCode(dtStart)}`)
         parts.push(`BYSETPOS=${nthInMonth(dtStart)}`)
-      } else {
-        // same calendar date — no BYDAY/SETPOS
       }
     }
 
@@ -184,6 +191,7 @@ export default function EventModal({ open, initial, onClose, onSave }: Props) {
     return parts.join(';')
   }
 
+  // ------- SAVE -------
   const onSubmit = () => {
     if (!title.trim()) { alert('Please enter a title'); return }
     if (!(startDT.isValid && endDT.isValid)) { alert('Please choose valid start and end times'); return }
@@ -205,13 +213,32 @@ export default function EventModal({ open, initial, onClose, onSave }: Props) {
       ...(responsibleAdult ? { responsibleAdult } : {}),
       ...(remindersMin.length ? { remindersMin } : {}),
     } as any
+
+    // NEW: external events are saved via events-agenda (creates/updates a local shadow if allowed)
+    if (initial && isExternal(initial)) {
+      upsertAgendaEvent(payload)
+      onClose()
+      return
+    }
+
+    // Local/baseline events → keep your existing series handling
     onSave(payload, initial?.rrule ? editMode : 'series')
   }
 
+  // ------- DELETE -------
   const onDelete = () => {
     if (!initial?.id) return
     if (!window.confirm('Delete this event? This cannot be undone.')) return
-    deleteEvent({ ...initial, start, end } as EventRecord, initial.rrule ? editMode : 'series')
+
+    // NEW: external/shadow delete → revert local edit or no-op on feed
+    if (isExternal(initial) || isShadow(initial)) {
+      deleteAgendaEvent(initial.id)
+      onClose()
+      return
+    }
+
+    // Local → your existing delete with series scope
+    deleteLocalEvent({ ...initial, start, end } as EventRecord, initial.rrule ? editMode : 'series')
     onClose()
   }
 
@@ -238,7 +265,23 @@ export default function EventModal({ open, initial, onClose, onSave }: Props) {
       <div className="modal modern">
         <header className="modal-h">
           <h3>{initial?.id ? 'Edit event' : 'Add event'}</h3>
-          <button onClick={onClose} aria-label="Close">×</button>
+
+          {/* NEW: external source badge (shows colour + name + edited if shadow) */}
+          {external && (
+            <span
+              title={meta.name ? `From ${meta.name}` : 'External calendar'}
+              style={{
+                display:'inline-flex', alignItems:'center', gap:6, fontSize:11,
+                padding:'2px 6px', borderRadius:999, background:'rgba(0,0,0,0.06)', marginLeft:8
+              }}
+            >
+              <span style={{ width:8, height:8, borderRadius:999, background: meta.color || '#64748b' }} />
+              <span>{meta.name || 'External'}</span>
+              {shadow && <span style={{ opacity:0.7 }}>· edited</span>}
+            </span>
+          )}
+
+          <button onClick={onClose} aria-label="Close" style={{ marginLeft: 'auto' }}>×</button>
         </header>
 
         <div className="modal-b" style={{ gap: '1rem' }}>
@@ -304,9 +347,20 @@ export default function EventModal({ open, initial, onClose, onSave }: Props) {
             ) : <p className="hint">No members yet. Add them in Settings → Members.</p>}
 
             <div className="row">
-              <input placeholder="Add attendee email" value={attendeeInput} onChange={e => setAttendeeInput(e.target.value)}
-                     onKeyDown={e => { if (e.key === 'Enter') { if (isEmail(attendeeInput)) { addAttendee(attendeeInput); setAttendeeInput('') } else alert('Please enter a valid email address') } }} />
-              <button onClick={() => { if (isEmail(attendeeInput)) { addAttendee(attendeeInput); setAttendeeInput('') } else alert('Please enter a valid email address') }}>Add</button>
+              <input
+                placeholder="Add attendee email"
+                value={attendeeInput}
+                onChange={e => setAttendeeInput(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') {
+                    if (isEmail(attendeeInput)) { addAttendee(attendeeInput); setAttendeeInput('') }
+                    else alert('Please enter a valid email address')
+                  }
+                }}
+              />
+              <button onClick={() => { if (isEmail(attendeeInput)) { addAttendee(attendeeInput); setAttendeeInput('') } else alert('Please enter a valid email address') }}>
+                Add
+              </button>
             </div>
 
             {attendees.length > 0 && (
@@ -324,7 +378,7 @@ export default function EventModal({ open, initial, onClose, onSave }: Props) {
             <div className="row" style={{ marginTop: '.35rem' }}>
               <select value={responsibleAdult} onChange={e => setResponsibleAdult(e.target.value)}>
                 <option value="">Not required / None</option>
-                {adultOptions.map(n => <option key={n} value={n}>{n}</option>)}
+                {members.filter(m => m.role === 'parent' || m.role === 'adult').map(m => <option key={m.id} value={m.name}>{m.name}</option>)}
               </select>
               {responsibleAdult && <span className="hint">They’ll see this in their agenda.</span>}
             </div>
@@ -339,12 +393,20 @@ export default function EventModal({ open, initial, onClose, onSave }: Props) {
               ))}
             </div>
             <div className="row">
-              <input placeholder="Add a custom tag" value={tagInput} onChange={e => setTagInput(e.target.value)}
-                     onKeyDown={e => { if (e.key === 'Enter') { addTag(tagInput); setTagInput('') } }} />
+              <input
+                placeholder="Add a custom tag"
+                value={tagInput}
+                onChange={e => setTagInput(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') { addTag(tagInput); setTagInput('') } }}
+              />
               <button onClick={() => { addTag(tagInput); setTagInput('') }}>Add</button>
             </div>
             {tags.length > 0 && (
-              <div className="chips">{tags.map(t => (<span className="chip" key={t}>{t}<button className="chip-x" onClick={() => removeTag(t)} aria-label={`Remove ${t}`}>×</button></span>))}</div>
+              <div className="chips">
+                {tags.map(t => (
+                  <span className="chip" key={t}>{t}<button className="chip-x" onClick={() => removeTag(t)} aria-label={`Remove ${t}`}>×</button></span>
+                ))}
+              </div>
             )}
           </section>
 
@@ -357,12 +419,20 @@ export default function EventModal({ open, initial, onClose, onSave }: Props) {
               ))}
             </div>
             <div className="row">
-              <input placeholder="Add an item" value={bringInput} onChange={e => setBringInput(e.target.value)}
-                     onKeyDown={e => { if (e.key === 'Enter') { addBring(bringInput); setBringInput('') } }} />
+              <input
+                placeholder="Add an item"
+                value={bringInput}
+                onChange={e => setBringInput(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') { addBring(bringInput); setBringInput('') } }}
+              />
               <button onClick={() => { addBring(bringInput); setBringInput('') }}>Add</button>
             </div>
             {checklist.length > 0 && (
-              <div className="chips">{checklist.map(t => (<span className="chip" key={t}>{t}<button className="chip-x" onClick={() => removeBring(t)} aria-label={`Remove ${t}`}>×</button></span>))}</div>
+              <div className="chips">
+                {checklist.map(t => (
+                  <span className="chip" key={t}>{t}<button className="chip-x" onClick={() => removeBring(t)} aria-label={`Remove ${t}`}>×</button></span>
+                ))}
+              </div>
             )}
           </section>
 
@@ -373,8 +443,11 @@ export default function EventModal({ open, initial, onClose, onSave }: Props) {
               {[0, 5, 10, 15, 30, 60, 120, 1440].map(m => {
                 const on = remindersMin.includes(m)
                 return (
-                  <button key={m} className={`chip ${on ? 'active' : ''}`}
-                          onClick={() => setRemindersMin(prev => on ? prev.filter(x => x !== m) : [...prev, m].sort((a,b)=>a-b))}>
+                  <button
+                    key={m}
+                    className={`chip ${on ? 'active' : ''}`}
+                    onClick={() => setRemindersMin(prev => on ? prev.filter(x => x !== m) : [...prev, m].sort((a,b)=>a-b))}
+                  >
                     {m === 0 ? 'At start' : `${m} min`}
                   </button>
                 )
@@ -456,7 +529,11 @@ export default function EventModal({ open, initial, onClose, onSave }: Props) {
                 {ends === 'on' && (
                   <label>
                     Until
-                    <input type="date" value={until ? DateTime.fromFormat(until, 'yyyyLLdd').toFormat('yyyy-LL-dd') : ''} onChange={e => setUntil(e.target.value ? DateTime.fromISO(e.target.value).toFormat('yyyyLLdd') : '')} />
+                    <input
+                      type="date"
+                      value={until ? DateTime.fromFormat(until, 'yyyyLLdd').toFormat('yyyy-LL-dd') : ''}
+                      onChange={e => setUntil(e.target.value ? DateTime.fromISO(e.target.value).toFormat('yyyyLLdd') : '')}
+                    />
                   </label>
                 )}
                 {ends === 'after' && (
@@ -484,7 +561,11 @@ export default function EventModal({ open, initial, onClose, onSave }: Props) {
 
         <footer className="modal-f">
           <div className="row" style={{ gap: '0.5rem' }}>
-            {initial?.id && <button onClick={onDelete} style={{ background: 'var(--danger)', color: '#fff', borderColor: 'var(--danger)' }}>Delete</button>}
+            {initial?.id && (
+              <button onClick={onDelete} style={{ background: 'var(--danger)', color: '#fff', borderColor: 'var(--danger)' }}>
+                Delete
+              </button>
+            )}
             <button onClick={onClose}>Cancel</button>
           </div>
           <div className="row" style={{ gap: '0.5rem' }}>
@@ -496,7 +577,7 @@ export default function EventModal({ open, initial, onClose, onSave }: Props) {
   )
 
   function nthLabel(dt: DateTime) {
-    const n = nthInMonth(dt)
+    const n = Math.ceil(dt.day / 7)
     return ['1st','2nd','3rd','4th','5th'][n-1] || `${n}th`
   }
 }
