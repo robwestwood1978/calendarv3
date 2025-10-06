@@ -22,14 +22,35 @@ function toast(msg: string) {
   try { window.dispatchEvent(new CustomEvent('toast', { detail: msg })) } catch {}
 }
 
+/** Correctly resolves colour using rules + members + tags (safe against missing settings). */
 function safePickEventColour(ev: EventRecord, settings: any): string | undefined {
   try {
     const rules = Array.isArray(settings?.colourRules) ? settings.colourRules : []
-    const memberLookup = settings?.memberLookup && typeof settings.memberLookup === 'object'
-      ? settings.memberLookup : undefined
-    if ((!rules || rules.length === 0) && !memberLookup) return undefined
-    return pickEventColour(ev, { rules, memberLookup })
+    const memberLookup = (settings && settings.memberLookup && typeof settings.memberLookup === 'object') ? settings.memberLookup : {}
+    const memberNames = Array.isArray((ev as any).attendees) ? (ev as any).attendees : []
+    const tags = Array.isArray((ev as any).tags) ? (ev as any).tags : []
+    const baseColour = (ev as any).colour
+    return pickEventColour({ baseColour, memberNames, tags, rules, memberLookup })
   } catch { return undefined }
+}
+
+// Choose readable text color (white/ink) for a given hex color (fallback to white).
+function idealTextColor(bg: string | undefined): string {
+  if (!bg) return '#fff'
+  // if CSS var or non-hex, default to white text (works for primary blues/greens)
+  if (!/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(bg)) return '#fff'
+  let r, g, b;
+  if (bg.length === 4) {
+    r = parseInt(bg[1]+bg[1],16)
+    g = parseInt(bg[2]+bg[2],16)
+    b = parseInt(bg[3]+bg[3],16)
+  } else {
+    r = parseInt(bg.slice(1,3),16)
+    g = parseInt(bg.slice(3,5),16)
+    b = parseInt(bg.slice(5,7),16)
+  }
+  const luminance = (0.299*r + 0.587*g + 0.114*b) / 255
+  return luminance > 0.6 ? '#0f172a' : '#fff'
 }
 
 export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize }: GridProps) {
@@ -75,21 +96,31 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
         ))}
       </div>
 
-      <div className="grid-days" style={{ gridTemplateColumns: `repeat(${days}, 1fr)` }}>
-        {cols.map(d => (
-          <div key={d.toISODate()} className="day-col" onDoubleClick={e => onBackgroundDoubleClick(e, d)}>
+      <div className="grid-days">
+        <div className="time-head row" />
+        {cols.map((d) => (
+          <div key={d.toISODate()} className="day-col">
             <div className="day-head">
-              <div className="day-name">{d.toFormat('ccc')}</div>
+              <div className="day-name">{d.toFormat('EEE')}</div>
               <div className="day-date">{d.toFormat('d LLL')}</div>
             </div>
-            <DayColumn
-              day={d}
-              hourHeight={hourHeight}
-              events={safeEvents.filter(e => DateTime.fromISO(e.start).hasSame(d, 'day') && !e.allDay)}
-              onEdit={onEdit}
-              onCommitChange={(ev) => { onMoveOrResize(ev); toast('Saved'); }}
-              settings={settings}
-            />
+            <div
+              className="day-body"
+              onDoubleClick={(e) => onBackgroundDoubleClick(e, d)}
+              style={{ height: `${24 * hourHeight}px` }}
+            >
+              <DayEvents
+                day={d}
+                hourHeight={hourHeight}
+                events={safeEvents}
+                onEdit={onEdit}
+                onCommitChange={onMoveOrResize}
+                settings={settings}
+              />
+              {Array.from({ length: 24 }).map((_, h) => (
+                <div key={h} className="hour-row" style={{ height: `${hourHeight}px` }} />
+              ))}
+            </div>
           </div>
         ))}
       </div>
@@ -98,11 +129,12 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
 }
 
 type DragState =
-  | { key: string; type: 'move'|'resize'; deltaMin: number; startY: number; moved: boolean }
   | null
+  | { key: string; type: 'move'; deltaMin: number; startY: number; moved: boolean }
+  | { key: string; type: 'resize'; deltaMin: number; startY: number; moved: boolean }
 
-function DayColumn({
-  day, hourHeight, events, onEdit, onCommitChange, settings,
+function DayEvents({
+  day, hourHeight, events, onEdit, onCommitChange, settings
 }: {
   day: DateTime
   hourHeight: number
@@ -143,34 +175,30 @@ function DayColumn({
 
       const onMoveDoc = (mm: MouseEvent) => {
         const dy = mm.clientY - startY
-        const moved = Math.abs(dy) > DRAG_THRESHOLD_PX
-        setDrag(prev => (prev && prev.key === key && prev.type === type)
-          ? { ...prev, deltaMin: snapDelta(dy), moved }
-          : prev)
+        if (!drag?.moved && Math.abs(dy) > DRAG_THRESHOLD_PX) setDrag(prev => prev ? { ...prev, moved: true } : prev)
+        setDrag(prev => prev ? { ...prev, deltaMin: snapDelta(dy) } : prev)
       }
-
-      const onUpDoc = () => {
+      const onUpDoc = (_up: MouseEvent) => {
         window.removeEventListener('mousemove', onMoveDoc)
         window.removeEventListener('mouseup', onUpDoc)
         setDrag(prev => {
-          if (prev && prev.key === key && prev.type === type) {
-            if (!prev.moved) {
-              onEdit(ev)
-            } else if (prev.deltaMin !== 0) {
-              if (type === 'move') {
-                onCommitChange({
-                  ...ev,
-                  _prevStart: (ev as any).start,
-                  start: s0.plus({ minutes: prev.deltaMin }).toISO()!,
-                  end:   e0.plus({ minutes: prev.deltaMin }).toISO()!,
-                } as any)
-              } else {
-                onCommitChange({
-                  ...ev,
-                  _prevStart: (ev as any).start,
-                  end: e0.plus({ minutes: prev.deltaMin }).toISO()!,
-                } as any)
-              }
+          if (!prev) return null
+          const { type } = prev
+          if (!prev.moved) return null
+          if (prev.deltaMin !== 0) {
+            if (type === 'move') {
+              onCommitChange({
+                ...ev,
+                _prevStart: (ev as any).start,
+                start: s0.plus({ minutes: prev.deltaMin }).toISO()!,
+                end:   e0.plus({ minutes: prev.deltaMin }).toISO()!,
+              } as any)
+            } else {
+              onCommitChange({
+                ...ev,
+                _prevStart: (ev as any).start,
+                end: e0.plus({ minutes: prev.deltaMin }).toISO()!,
+              } as any)
             }
           }
           return null
@@ -182,6 +210,7 @@ function DayColumn({
     }
 
     const isPreviewing = !!(drag && drag.key === key)
+    const textColor = idealTextColor(typeof colour === 'string' ? colour : undefined)
 
     return (
       <div
@@ -194,10 +223,11 @@ function DayColumn({
           left: 6, right: 6,
           top, height,
           zIndex: 1000,
-          background: '#fff',
+          background: colour,
           borderRadius: 12,
           boxShadow: '0 2px 10px rgba(0,0,0,0.06)',
           borderLeft: `3px solid ${colour}`,
+          color: textColor,
           padding: '6px 8px 10px 8px',
           cursor: 'pointer',
           opacity: isPreviewing ? 0.95 : 1,
@@ -211,7 +241,7 @@ function DayColumn({
             position: 'relative', zIndex: 2,
             fontWeight: 600, fontSize: 13,
             whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-            color: 'var(--text, #0f172a)',
+            color: 'inherit',
             pointerEvents: 'auto',
           }}
           onClick={(e) => e.stopPropagation()}
@@ -225,8 +255,10 @@ function DayColumn({
           onMouseDown={(e) => beginDrag(e, 'resize')}
           style={{
             position: 'absolute',
-            left: 8, right: 8, bottom: 4,
-            height: 6, borderRadius: 999,
+            left: 8, right: 8,
+            bottom: 4,
+            height: 6,
+            borderRadius: 999,
             background: 'rgba(0,0,0,0.08)',
             cursor: 'ns-resize',
             zIndex: 2,
@@ -236,25 +268,18 @@ function DayColumn({
     )
   }
 
-  return (
-    <div className="day-body" style={{ position: 'relative' }}>
-      {Array.from({ length: 24 }).map((_, h) => (
-        <div key={h} className="hour-row" style={{ height: `${hourHeight}px`, borderTop: '1px solid #eef2f7' }} />
-      ))}
-      {events.map(renderEvt)}
-    </div>
-  )
+  const eventsForDay = (d: DateTime) => events.filter(e => DateTime.fromISO(e.start).hasSame(d, 'day'))
+
+  return <>{eventsForDay(day).map(renderEvt)}</>
 }
 
-interface MonthGridProps {
+export function MonthGrid({ cursor, query, onNewAt, onEdit, onMoveOrResize }: {
   cursor: DateTime
   query: string
-  onNewAt: (dt: DateTime) => void
+  onNewAt: (start: DateTime) => void
   onEdit: (evt: EventRecord) => void
   onMoveOrResize?: (evt: EventRecord) => void
-}
-
-export function MonthGrid({ cursor, query, onNewAt, onEdit, onMoveOrResize }: MonthGridProps) {
+}) {
   const start = cursor.startOf('month').startOf('week')
   const days = Array.from({ length: 42 }, (_, i) => start.plus({ days: i }))
   const end = days[days.length - 1].endOf('day')
@@ -298,10 +323,13 @@ export function MonthGrid({ cursor, query, onNewAt, onEdit, onMoveOrResize }: Mo
                 onDragDay(original, day)
               } catch {}
             }}
-            style={{ position: 'relative' }}
           >
-            <div className="mhead">{i < 7 ? day.toFormat('ccc d LLL') : day.toFormat('d')}</div>
-            <div className="mitems" style={{ display:'grid', gap: 2 }}>
+            <div className="mhead">
+              {i < 7 && <div className="dow">{day.toFormat('EEE')}</div>}
+              <div className="d">{day.toFormat('d')}</div>
+            </div>
+
+            <div className="mbody">
               {allDay.map(e => (
                 <button
                   key={`${e.id}-${e.start}-a`}
@@ -309,13 +337,8 @@ export function MonthGrid({ cursor, query, onNewAt, onEdit, onMoveOrResize }: Mo
                   onClick={() => onEdit(e)}
                   draggable
                   onDragStart={(ev) => { ev.dataTransfer.setData('text/plain', JSON.stringify(e)) }}
-                  style={{
-                    display:'flex', alignItems:'center', gap:6,
-                    background:'transparent', border:0, textAlign:'left', padding:2, cursor:'pointer'
-                  }}
                 >
-                  <span className="dot" style={{ width:8, height:8, borderRadius:999, background: (e as any)._calendarColor || 'var(--primary)' }} />
-                  <span>{e.title}</span>
+                  {e.title}
                 </button>
               ))}
               {timed.map(e => (
