@@ -1,6 +1,7 @@
-/* frontend/src/calendar-hotfix.css */
+/* frontend/src/calendar-hotfix.css
+   Scoped, aggressive reset for overlays in the calendar only. */
 
-/* Prevent accidental stacking contexts on calendar containers */
+/* 1) Prevent stacking-context surprises */
 .calendar-page,
 .calendar-page .main,
 .timewrap,
@@ -14,30 +15,50 @@
   position: relative;
 }
 
-/* Events should sit above grid lines but below the modal */
-.timewrap .event {
-  z-index: 1000 !important;
-  background: #fff;
-  border-radius: 12px;
-  overflow: hidden;
-}
-
-/* Remove any legacy masks/ghosts inside the grid */
+/* 2) Nuke ANY overlay/pseudo inside events (the root cause) */
+.timewrap .event,
+.timewrap .event *,
 .timewrap .event::before,
 .timewrap .event::after,
-.timewrap .event .overlay,
-.timewrap .event .pill,
-.timewrap .event .bg,
-.timewrap .event [data-overlay],
-.timewrap .event-overlay,
-.timewrap .event-ghost {
-  display: none !important;
-  content: none !important;
-  pointer-events: none !important;
+.timewrap .event *::before,
+.timewrap .event *::after {
+  /* wipe paints applied by broad global selectors */
+  background: none !important;
+  box-shadow: none !important;
+  filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  content: none !important;           /* for pseudos */
+  pointer-events: auto;               /* keep interactivity */
 }
 
-/* Make sure the modal always wins */
+/* 3) Re-apply the event’s intended look (only on the root .event) */
+.timewrap .event {
+  background: #fff !important;
+  border-radius: 12px !important;
+  border-left-width: 3px !important;
+  border-left-style: solid !important;
+  /* the actual colour still comes from inline style in EventGrid */
+  overflow: hidden;
+  z-index: 1000 !important;
+}
+
+/* title + resize handle must sit above any stray paints */
+.timewrap .event .evt-title,
+.timewrap .event .evt-resize {
+  position: relative;
+  z-index: 2;
+}
+
+/* 4) Keep hour rows visible beneath events */
+.day-body .hour-row {
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+/* 5) Make sure the modal always wins */
 .modal-backdrop,
 .modal-backdrop .modal {
-  z-index: 2147483000 !important;
+  position: fixed !important;
+  z-index: 2147483647 !important; /* max practical z-index */
 }
