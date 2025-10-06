@@ -16,7 +16,6 @@ interface GridProps {
 
 const SNAP_MINUTES = 15
 
-/* ------------- Toast helper ------------- */
 function toast(msg: string) {
   try { window.dispatchEvent(new CustomEvent('toast', { detail: msg })) } catch {}
 }
@@ -112,11 +111,9 @@ function DayColumn({
     }
 
     const top = (s.diff(dayStart, 'minutes').minutes / 60) * hourHeight
-    const height = Math.max(24, (e.diff(s, 'minutes').minutes / 60) * hourHeight)
-    const colour = pickEventColour({
-      baseColour: ev.colour,
-      memberNames: ev.attendees,
-      tags: ev.tags,
+    const height = (e.diff(s, 'minutes').minutes / 60) * hourHeight
+
+    const color = pickEventColour(ev, {
       rules: settings.colourRules,
       memberLookup: settings.memberLookup,
     })
@@ -125,12 +122,15 @@ function DayColumn({
       md.stopPropagation(); md.preventDefault()
       const startY = md.clientY
       setDrag({ key, type: 'move', deltaMin: 0 })
-      const onMoveDoc = (mm: MouseEvent) => setDrag(prev => (prev && prev.key === key && prev.type === 'move') ? { ...prev, deltaMin: snapDelta(mm.clientY - startY) } : prev)
+      const onMoveDoc = (mm: MouseEvent) => setDrag(prev => (prev && prev.key === key && prev.type === 'move')
+        ? { ...prev, deltaMin: snapDelta(mm.clientY - startY) }
+        : prev)
       const onUpDoc = () => {
         window.removeEventListener('mousemove', onMoveDoc)
         window.removeEventListener('mouseup', onUpDoc)
         setDrag(prev => {
           if (prev && prev.key === key && prev.type === 'move' && prev.deltaMin !== 0) {
+            // ✅ Preserve metadata so state layer can shadow/block correctly
             onCommitChange({ ...ev, start: s0.plus({ minutes: prev.deltaMin }).toISO()!, end: e0.plus({ minutes: prev.deltaMin }).toISO()! })
           }
           return null
@@ -143,14 +143,16 @@ function DayColumn({
       md.stopPropagation(); md.preventDefault()
       const startY = md.clientY
       setDrag({ key, type: 'resize', deltaMin: 0 })
-      const onMoveDoc = (mm: MouseEvent) => setDrag(prev => (prev && prev.key === key && prev.type === 'resize') ? { ...prev, deltaMin: snapDelta(mm.clientY - startY) } : prev)
+      const onMoveDoc = (mm: MouseEvent) => setDrag(prev => (prev && prev.key === key && prev.type === 'resize')
+        ? { ...prev, deltaMin: snapDelta(mm.clientY - startY) }
+        : prev)
       const onUpDoc = () => {
         window.removeEventListener('mousemove', onMoveDoc)
         window.removeEventListener('mouseup', onUpDoc)
         setDrag(prev => {
           if (prev && prev.key === key && prev.type === 'resize' && prev.deltaMin !== 0) {
-            const newEnd = e0.plus({ minutes: prev.deltaMin })
-            onCommitChange({ ...ev, end: (newEnd > s0 ? newEnd : s0.plus({ minutes: SNAP_MINUTES })).toISO()! })
+            // ✅ Preserve metadata so state layer can shadow/block correctly
+            onCommitChange({ ...ev, end: e0.plus({ minutes: prev.deltaMin }).toISO()! })
           }
           return null
         })
@@ -166,70 +168,59 @@ function DayColumn({
         className="event"
         style={{
           top, height,
-          background: colour || '#1e88e5',
-          zIndex: isPreviewing ? 3 : 2,
-          boxShadow: isPreviewing ? '0 6px 20px rgba(0,0,0,.25)' : undefined,
-          opacity: isPreviewing ? 0.92 : 1,
+          borderLeft: `3px solid ${(ev as any)._calendarColor || color}`,
+          paddingLeft: 6,
+          opacity: isPreviewing ? 0.8 : 1,
         }}
-        onClick={(e) => { e.stopPropagation(); onEdit(ev) }}
+        onDoubleClick={() => onEdit(ev)}
+        onMouseDown={startDrag}
         role="button"
-        aria-label={`${ev.title} ${s.toFormat('HH:mm')}–${e.toFormat('HH:mm')}`}
       >
-        <div className="drag-handle" onMouseDown={startDrag} title="Drag to move" />
-        <div className="event-body">
-          <div className="title" title={ev.title}>{ev.title}</div>
-          <div className="time">{s.toFormat('HH:mm')}–{e.toFormat('HH:mm')}</div>
-        </div>
-        <div className="resize-handle" onMouseDown={startResize} title="Drag to resize" />
+        <div className="evt-title">{ev.title}</div>
+        <div className="evt-resize" onMouseDown={startResize} />
       </div>
     )
   }
 
   return (
-    <div
-      className="day-stack"
-      style={{
-        height: `calc(24 * ${hourHeight}px)`,
-        backgroundImage: `linear-gradient(to bottom, transparent ${hourHeight - 1}px, var(--border) ${hourHeight}px)`,
-        backgroundSize: `100% ${hourHeight}px`,
-      }}
-    >
+    <div className="day-body" style={{ position: 'relative' }}>
+      {/* hour rows */}
+      {Array.from({ length: 24 }).map((_, h) => (
+        <div key={h} className="hour-row" style={{ height: `${hourHeight}px` }} />
+      ))}
+
+      {/* events */}
       {events.map(renderEvt)}
     </div>
   )
 }
 
-/* ---------------- Month grid with all-day row ---------------- */
+/* ---------------- Month grid (optional drag) ---------------- */
 
-export function MonthGrid({
-  cursor, query, onNewAt, onEdit,
-}: {
+interface MonthGridProps {
   cursor: DateTime
   query: string
-  onNewAt: (start: DateTime) => void
-  onEdit: (e: EventRecord) => void
-}) {
-  const settings = useSettings()
+  onNewAt: (dt: DateTime) => void
+  onEdit: (evt: EventRecord) => void
+  onMoveOrResize?: (evt: EventRecord) => void
+}
+
+export function MonthGrid({ cursor, query, onNewAt, onEdit, onMoveOrResize }: MonthGridProps) {
   const start = cursor.startOf('month').startOf('week')
-  const end = cursor.endOf('month').endOf('week')
-  const events = listExpanded(start, end, query)
-  const safeEvents = events.filter(e => DateTime.fromISO(e.start).isValid && DateTime.fromISO(e.end).isValid)
+  const days = Array.from({ length: 42 }, (_, i) => start.plus({ days: i }))
+  const end = days[days.length - 1].endOf('day')
 
-  const days: DateTime[] = []
-  let d = start
-  while (d <= end) { days.push(d); d = d.plus({ days: 1 }) }
+  const events = listExpanded(start, end, query).filter(e => DateTime.fromISO(e.start).isValid && DateTime.fromISO(e.end).isValid)
 
-  const eventsForDay = (day: DateTime) =>
-    safeEvents.filter(e => DateTime.fromISO(e.start).hasSame(day, 'day'))
+  const eventsForDay = (d: DateTime) => events.filter(e => DateTime.fromISO(e.start).hasSame(d, 'day'))
 
-  const colourFor = (e: EventRecord) =>
-    pickEventColour({
-      baseColour: e.colour,
-      memberNames: e.attendees,
-      tags: e.tags,
-      rules: settings.colourRules,
-      memberLookup: settings.memberLookup,
-    })
+  const onDragDay = (original: EventRecord, newDay: DateTime) => {
+    const s0 = DateTime.fromISO(original.start); const e0 = DateTime.fromISO(original.end)
+    const s1 = newDay.set({ hour: s0.hour, minute: s0.minute })
+    const delta = s1.diff(s0, 'minutes').minutes
+    const updated: EventRecord = { ...original, start: s0.plus({ minutes: delta }).toISO()!, end: e0.plus({ minutes: delta }).toISO()! } // ✅ preserve meta
+    if (onMoveOrResize) onMoveOrResize(updated)
+  }
 
   return (
     <div className="month-grid">
@@ -244,65 +235,42 @@ export function MonthGrid({
             className={`mcell ${day.hasSame(cursor, 'month') ? '' : 'dim'}`}
             onDoubleClick={() => onNewAt(day.set({ hour: 9, minute: 0 }))}
           >
-            <div className="mhead">{i < 7 ? day.toFormat('ccc d') : day.toFormat('d')}</div>
-
-            {allDay.length > 0 && (
-              <div className="mbadges">
-                {allDay.slice(0, 3).map(e => {
-                  const col = colourFor(e) || '#1e88e5'
-                  return (
-                    <button
-                      key={`${e.id}-${e.start}-ad`}
-                      className="mbadge"
-                      style={{ background: col, color: '#fff', borderColor: col }}
-                      title={e.title}
-                      onClick={() => onEdit(e)}
-                    >
-                      {e.title}
-                    </button>
-                  )
-                })}
-              </div>
-            )}
-
-            <div className="mlist">
-              {timed.map(e => {
-                const col = colourFor(e) || '#1e88e5'
-                return (
-                  <button
-                    key={`${e.id}-${e.start}`}
-                    className="mitem"
-                    onClick={() => onEdit(e)}
-                    style={{ background: col, color: '#fff', borderColor: col }}
-                    title={e.title}
-                  >
-                    <span className="mtitle">{e.title}</span>
-                    <span className="mtime">{DateTime.fromISO(e.start).toFormat('HH:mm')}</span>
-                  </button>
-                )
-              })}
+            <div className="mhead">{i < 7 ? day.toFormat('ccc d LLL') : day.toFormat('d')}</div>
+            <div className="mitems">
+              {allDay.map(e => (
+                <div key={`${e.id}-${e.start}-a`} className="mall" onDoubleClick={() => onEdit(e)}>
+                  <span className="dot" style={{ background: (e as any)._calendarColor || 'var(--primary)' }} /> {e.title}
+                </div>
+              ))}
+              {timed.map(e => (
+                <div
+                  key={`${e.id}-${e.start}-t`}
+                  className="mtimed"
+                  draggable
+                  onDragStart={(ev) => { ev.dataTransfer.setData('text/plain', JSON.stringify(e)) }}
+                  onDoubleClick={() => onEdit(e)}
+                >
+                  <span className="dot" style={{ background: (e as any)._calendarColor || 'var(--primary)' }} />
+                  {DateTime.fromISO(e.start).toFormat('HH:mm')} {e.title}
+                </div>
+              ))}
             </div>
+            {/* drop target */}
+            <div
+              className="dropzone"
+              onDragOver={(ev) => ev.preventDefault()}
+              onDrop={(ev) => {
+                ev.preventDefault()
+                try {
+                  const raw = ev.dataTransfer.getData('text/plain')
+                  const original = JSON.parse(raw) as EventRecord
+                  onDragDay(original, day)
+                } catch {}
+              }}
+            />
           </div>
         )
       })}
     </div>
   )
-}
-
-/* Lightweight toast listener. Place this component once in your app shell if you want global toasts.
-   If you don't have a shell, Month/Time grids fire a 'toast' event anyway – it's harmless if nothing listens. */
-export function ToastHost() {
-  const [msg, setMsg] = React.useState<string | null>(null)
-  React.useEffect(() => {
-    const h = (e: Event) => {
-      const ce = e as CustomEvent<string>
-      setMsg(ce.detail)
-      const t = setTimeout(() => setMsg(null), 1400)
-      return () => clearTimeout(t)
-    }
-    window.addEventListener('toast', h as any)
-    return () => window.removeEventListener('toast', h as any)
-  }, [])
-  if (!msg) return null
-  return <div className="toast">{msg}</div>
 }
