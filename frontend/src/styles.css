@@ -197,16 +197,16 @@ button.primary:hover { filter: brightness(0.96); }
   border-top: 1px solid #eef2f7;
 }
 
-/* Event card — MATCHES current EventGrid structure */
+/* Event card — FIX: remove white pill */
 .timewrap .event {
   position: absolute;
   left: 8px;
   right: 8px;
-  background: #fff;                   /* visible card background */
-  color: var(--text);                 /* readable text (not white) */
+  background: transparent !important; /* ← was #fff; this caused the white pill */
+  color: inherit;                      /* titles inherit computed contrast */
   border-radius: 12px;
   box-shadow: var(--shadow);
-  border-left: 3px solid var(--primary); /* actual color is set inline */
+  border-left: 3px solid var(--primary); /* actual color can be set inline */
   padding: 6px 8px 10px 8px;
   user-select: none;
   cursor: pointer;
@@ -221,7 +221,7 @@ button.primary:hover { filter: brightness(0.96); }
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  color: var(--text);
+  color: inherit;
   position: relative;
   z-index: 2;
 }
@@ -444,6 +444,7 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   color: #fff;
   border-color: var(--primary);
 }
+
 /* Final guard: no pseudo/overlay on calendar events */
 .timewrap .event::before,
 .timewrap .event::after,
