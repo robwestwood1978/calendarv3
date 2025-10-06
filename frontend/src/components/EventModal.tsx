@@ -1,3 +1,4 @@
+// frontend/src/components/EventModal.tsx
 import React, { useEffect, useMemo, useState } from 'react'
 import { DateTime, Duration } from 'luxon'
 import { useSettings } from '../state/settings'
@@ -6,10 +7,10 @@ import type { EventRecord } from '../lib/recurrence'
 // Local (baseline) delete for your own events/series logic
 import { deleteEvent as deleteLocalEvent } from '../state/events'
 
-// NEW: state layer that handles shadows for external events
+// State layer that handles shadows/tombstones for external events
 import { upsertEvent as upsertAgendaEvent, deleteEvent as deleteAgendaEvent } from '../state/events-agenda'
 
-// NEW: helpers to detect external/shadow + fetch calendar meta (name/colour)
+// Helpers to detect external/shadow + fetch calendar meta (name/colour)
 import { calendarMetaFor, isExternal, isShadow } from '../lib/external'
 
 export type RepeatFreq = 'none' | 'daily' | 'weekly' | 'monthly' | 'yearly'
@@ -38,7 +39,7 @@ export default function EventModal({ open, initial, onClose, onSave }: Props) {
   const settings = useSettings()
   const { tags: presetTags, bringPresets, members, defaults, timezone } = settings
 
-  // ------- NEW: external/shadow metadata for header badge -------
+  // ------- external/shadow metadata for header badge -------
   const meta = useMemo(() => calendarMetaFor(initial), [initial])
   const external = !!(initial && isExternal(initial))
   const shadow = !!(initial && isShadow(initial))
@@ -214,12 +215,12 @@ export default function EventModal({ open, initial, onClose, onSave }: Props) {
       ...(remindersMin.length ? { remindersMin } : {}),
     } as any
 
-    // If time changed, include previous start so external layer can tombstone old and shadow new
-    const timeChanged = !!initial && (initial.start !== payload.start || initial.end !== payload.end)
-    if (timeChanged) { (payload as any)._prevStart = initial!.start }
+    // If times changed, attach _prevStart so the state layer can tombstone & shadow external items.
+    const changedTime = !!(initial && (initial.start !== start || initial.end !== end))
+    if (changedTime) (payload as any)._prevStart = initial?.start
 
-    // NEW: external events are saved via events-agenda (creates/updates a local shadow if allowed)
-    if (initial && isExternal(initial)) {
+    // External/shadow items → use events-agenda to create/update local shadow
+    if (initial && (isExternal(initial) || isShadow(initial))) {
       upsertAgendaEvent(payload)
       onClose()
       return
@@ -234,7 +235,7 @@ export default function EventModal({ open, initial, onClose, onSave }: Props) {
     if (!initial?.id) return
     if (!window.confirm('Delete this event? This cannot be undone.')) return
 
-    // NEW: external/shadow delete → revert local edit or no-op on feed
+    // External/shadow delete → remove local shadow/tombstone
     if (isExternal(initial) || isShadow(initial)) {
       deleteAgendaEvent(initial.id)
       onClose()
@@ -270,7 +271,7 @@ export default function EventModal({ open, initial, onClose, onSave }: Props) {
         <header className="modal-h">
           <h3>{initial?.id ? 'Edit event' : 'Add event'}</h3>
 
-          {/* NEW: external source badge (shows colour + name + edited if shadow) */}
+          {/* external source badge (shows colour + name + edited if shadow) */}
           {external && (
             <span
               title={meta.name ? `From ${meta.name}` : 'External calendar'}
