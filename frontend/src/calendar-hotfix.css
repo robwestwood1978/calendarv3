@@ -1,0 +1,43 @@
+/* frontend/src/calendar-hotfix.css */
+
+/* Prevent accidental stacking contexts on calendar containers */
+.calendar-page,
+.calendar-page .main,
+.timewrap,
+.grid-days,
+.day-col,
+.day-body {
+  transform: none !important;
+  filter: none !important;
+  perspective: none !important;
+  isolation: auto !important;
+  position: relative;
+}
+
+/* Events should sit above grid lines but below the modal */
+.timewrap .event {
+  z-index: 1000 !important;
+  background: #fff;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+/* Remove any legacy masks/ghosts inside the grid */
+.timewrap .event::before,
+.timewrap .event::after,
+.timewrap .event .overlay,
+.timewrap .event .pill,
+.timewrap .event .bg,
+.timewrap .event [data-overlay],
+.timewrap .event-overlay,
+.timewrap .event-ghost {
+  display: none !important;
+  content: none !important;
+  pointer-events: none !important;
+}
+
+/* Make sure the modal always wins */
+.modal-backdrop,
+.modal-backdrop .modal {
+  z-index: 2147483000 !important;
+}
