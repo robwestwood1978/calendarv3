@@ -72,16 +72,11 @@ function writeShadows(arr: Shadow[]) { localStorage.setItem(LS_SHADOWS, JSON.str
 /** Map of extKey -> Shadow */
 function shadowMap(): Map<string, Shadow> { const map = new Map<string, Shadow>(); for (const s of readShadows()) map.set(s.extKey, s); return map }
 
-/* -------- local ext identity helpers (self-contained) ---------- */
-function parseFromId(id: string): { calId?: string, uid?: string } {
-  if (!id || !id.startsWith('ext:')) return {}
-  const parts = id.split(':') // ext:calId:uid:...
-  return { calId: parts[1], uid: parts[2] }
-}
+/** Robustly derive {calId, uid} for an external event without requiring new exports. */
 function getExtIdentityLocal(evt: any): { calId?: string, uid?: string } {
-  const fromId = parseFromId(String(evt?.id || ''))
-  const calId = evt?._calendarId || fromId.calId
-  const uid   = evt?._uid        || fromId.uid
+  const id = String(evt?.id || '')
+  const calId = evt?._calendarId || (id.startsWith('ext:') ? id.split(':')[1] : undefined)
+  const uid   = evt?._uid        || (id.startsWith('ext:') ? id.split(':')[2] : undefined)
   return { calId, uid }
 }
 
@@ -141,9 +136,9 @@ export function listExpanded(from: DateTime, to: DateTime, query: string): Event
 
   const calMap = new Map(listCalendars().map(c => [c.id, new Set(c.assignedMemberIds || [])]))
   const externalsFiltered = merged.filter(evt => {
-    const id = (evt as any)._calendarId as string | undefined
-    if (!id) return false
-    const set = calMap.get(id); if (!set) return false
+    const idCal = (evt as any)._calendarId as string | undefined
+    if (!idCal) return false
+    const set = calMap.get(idCal); if (!set) return false
     for (const m of set) if (linkedIds.has(m)) return true
     return false
   })
@@ -186,25 +181,25 @@ export function upsertEvent(evt: EventRecord, scope?: 'single'|'following'|'seri
 
     const shadows = readShadows()
 
-    // tombstone (hide original at old time)
+    // 1) Tombstone the old provider instance (hide original at its previous time)
     if (oldKey && prevStart && newKey && newKey !== oldKey) {
+      const idxOld = shadows.findIndex(s => s.extKey === oldKey && (s as any).source === 'tombstone')
       const tomb: Tombstone = { source: 'tombstone', extKey: oldKey, shadowAt: new Date().toISOString() }
-      const iOld = shadows.findIndex(s => s.extKey === oldKey && (s as any).source === 'tombstone')
-      if (iOld >= 0) shadows[iOld] = tomb; else shadows.push(tomb)
+      if (idxOld >= 0) shadows[idxOld] = tomb; else shadows.push(tomb)
     }
 
-    // shadow (show moved/edited copy at new time)
+    // 2) Shadow for the (possibly moved) event at its new time
     if (newKey) {
-      const shadow = { ...(evt as any), source: 'shadow' as const, extKey: newKey, shadowOf: String(evt.id), shadowAt: new Date().toISOString() }
-      const iNew = shadows.findIndex(s => s.extKey === newKey && (s as any).source === 'shadow')
-      if (iNew >= 0) shadows[iNew] = shadow as any; else shadows.push(shadow as any)
+      const baseShadow = { ...(evt as any), source: 'shadow', extKey: newKey, shadowOf: String(evt.id), shadowAt: new Date().toISOString() }
+      const idx = shadows.findIndex(s => s.extKey === newKey && (s as any).source === 'shadow')
+      if (idx >= 0) shadows[idx] = baseShadow as Shadow; else shadows.push(baseShadow as Shadow)
     }
 
     writeShadows(shadows)
     return evt
   }
 
-  // ---------- LOCAL/INTERNAL EDITS ----------
+  // Local edits (and all non-external) → baseline with Slice C guards
   if (!featureAuthEnabled()) { const saved = (base as any).upsertEvent(evt, scope); emitChanged(); return saved }
   const u = currentUser()
   if (!u) { const saved = (base as any).upsertEvent(evt, scope); emitChanged(); return saved }
@@ -237,8 +232,9 @@ export function deleteEvent(id: string): void {
   (base as any).deleteEvent(id); emitChanged()
 }
 
-export const list      = (base as any).list      as typeof base.list
-export const listRange = (base as any).listRange as typeof base.listRange
+/* NOTE: We intentionally do NOT re-export base.list / base.listRange because your base file
+   doesn’t export them in this build, which caused the Vite error. Keep imports using listExpanded. */
+
 export * from './events'
 
 // Reactive bridge
