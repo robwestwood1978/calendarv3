@@ -1,3 +1,4 @@
+// frontend/src/lib/external.ts
 // Helpers for external calendar events and local shadow overlays.
 
 import type { EventRecord } from '../lib/recurrence'
@@ -5,6 +6,10 @@ import { listCalendars } from '../state/integrations'
 
 export function isExternal(evt: any): boolean {
   return !!(evt && (evt._calendarId || String(evt.id || '').startsWith('ext:')))
+}
+
+export function isShadow(evt: any): boolean {
+  return !!(evt && evt.source === 'shadow')
 }
 
 export function calendarMetaFor(evt: any): { id?: string, name?: string, color?: string, isExternal: boolean } {
