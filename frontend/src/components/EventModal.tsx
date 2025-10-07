@@ -1,3 +1,4 @@
+// frontend/src/components/EventModal.tsx
 import React, { useEffect, useMemo, useState } from 'react'
 import { DateTime, Duration } from 'luxon'
 import { useSettings } from '../state/settings'
@@ -213,6 +214,12 @@ export default function EventModal({ open, initial, onClose, onSave }: Props) {
       ...(responsibleAdult ? { responsibleAdult } : {}),
       ...(remindersMin.length ? { remindersMin } : {}),
     } as any
+
+    // >>> Minimal addition so occurrence edits stick (locals + external)
+    if (initial?.start && initial.start !== start) {
+      ;(payload as any)._prevStart = initial.start
+    }
+    // <<<
 
     // NEW: external events are saved via events-agenda (creates/updates a local shadow if allowed)
     if (initial && isExternal(initial)) {
@@ -578,6 +585,6 @@ export default function EventModal({ open, initial, onClose, onSave }: Props) {
 
   function nthLabel(dt: DateTime) {
     const n = Math.ceil(dt.day / 7)
-    return ['1st','2nd','3rd','4th','5th'][n-1] || `${n}th`
+    return ['1st','2nd','3rd','5th'][n-1] || `${n}th`
   }
 }
