@@ -56,6 +56,7 @@ export default function Home() {
     return st.toISODate() !== now.toISODate()
   })
 
+  // group restOfWeek by day
   const byDay = useMemo(() => {
     const map = new Map<string, EventRecord[]>()
     for (const e of restOfWeek) {
@@ -64,9 +65,9 @@ export default function Home() {
       map.get(key)!.push(e)
     }
     for (const [, arr] of map) arr.sort((a,b) => a.start.localeCompare(b.start))
-    return Array.from(map.entries()).sort(([a],[b]) => a.localeCompare(b)).map(([k, items]) => ({
-      day: DateTime.fromISO(`${k}T00:00:00`), items
-    }))
+    return Array.from(map.entries())
+      .sort(([a],[b]) => a.localeCompare(b))
+      .map(([k, items]) => ({ day: DateTime.fromISO(`${k}T00:00:00`), items }))
   }, [restOfWeek])
 
   function Item({ e }: { e: EventRecord }) {

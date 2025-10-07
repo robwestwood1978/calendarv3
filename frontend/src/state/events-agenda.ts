@@ -61,24 +61,11 @@ function overlaps(evt: EventRecord, from: DateTime, to: DateTime): boolean {
   return s <= to && e >= from
 }
 
-/** Local overlay for an external occurrence. Also used as “tombstone” (hide original). */
-type Shadow = (EventRecord & { source: 'shadow', extKey: string, shadowOf: string, shadowAt: string }) | Tombstone
-type Tombstone = { source: 'tombstone', extKey: string, shadowAt: string }
-
-function isTombstone(x: Shadow): x is Tombstone { return (x as any).source === 'tombstone' }
+// ---- Shadows (local overlays for external instances) ----
+type Shadow = EventRecord & { source: 'shadow', extKey: string, shadowOf: string, shadowAt: string }
 function readShadows(): Shadow[] { return safeParse<Shadow[]>(localStorage.getItem(LS_SHADOWS)) || [] }
 function writeShadows(arr: Shadow[]) { localStorage.setItem(LS_SHADOWS, JSON.stringify(arr)); emitChanged() }
-
-/** Map of extKey -> Shadow */
 function shadowMap(): Map<string, Shadow> { const map = new Map<string, Shadow>(); for (const s of readShadows()) map.set(s.extKey, s); return map }
-
-/** Robustly derive {calId, uid} for an external event without requiring new exports. */
-function getExtIdentityLocal(evt: any): { calId?: string, uid?: string } {
-  const id = String(evt?.id || '')
-  const calId = evt?._calendarId || (id.startsWith('ext:') ? id.split(':')[1] : undefined)
-  const uid   = evt?._uid        || (id.startsWith('ext:') ? id.split(':')[2] : undefined)
-  return { calId, uid }
-}
 
 // ---------- FILTERED READS ----------
 export function listExpanded(from: DateTime, to: DateTime, query: string): EventRecord[] {
@@ -86,38 +73,18 @@ export function listExpanded(from: DateTime, to: DateTime, query: string): Event
   let externals: EventRecord[] = []
   try { externals = externalExpanded(from, to, query).filter(e => overlaps(e, from, to)) } catch { externals = [] }
 
+  // Apply shadows (replace provider instances when a shadow exists for that occurrence)
   const sMap = shadowMap()
-
-  // First, process provider externals: replace with shadow if present, or skip if tombstoned
-  const matchedKeys = new Set<string>()
-  const processedExternals: EventRecord[] = []
-  for (const e of externals) {
+  const withShadows = externals.map(e => {
     const key = toExtKey(e)
-    if (!key) { processedExternals.push(e); continue }
-    const sh = sMap.get(key)
-    if (!sh) { processedExternals.push(e); continue }
-    if (isTombstone(sh)) {
-      matchedKeys.add(key) // hidden
-      continue
-    }
-    matchedKeys.add(key)
-    processedExternals.push(sh as EventRecord) // replacement
-  }
+    return (key && sMap.has(key)) ? sMap.get(key)! as EventRecord : e
+  })
 
-  // Then, add any shadow that did NOT match a provider key (moved/retimed standalone)
-  const standaloneShadows = Array.from(sMap.values())
-    .filter(s => !isTombstone(s))
-    .filter(s => !matchedKeys.has((s as any).extKey))
-    .map(s => s as EventRecord)
-    .filter(e => overlaps(e, from, to))
-
-  const merged = [...locals, ...processedExternals, ...standaloneShadows]
-
-  // My Agenda OFF → just de-dupe by (id,start)
+  // My Agenda OFF → merged window slice, de-duped by (id,start)
   if (!featureAuthEnabled() || !myAgendaOn()) {
     const out: EventRecord[] = []
     const seen = new Set<string>()
-    for (const e of merged) {
+    for (const e of [...locals, ...withShadows]) {
       const key = `${e.id}@@${e.start}`
       if (seen.has(key)) continue
       seen.add(key); out.push(e)
@@ -129,16 +96,13 @@ export function listExpanded(from: DateTime, to: DateTime, query: string): Event
   const u = currentUser()
   const linkedIds = new Set<string>(u?.linkedMemberIds || [])
   const names = linkedNameCandidates()
-  const localsFiltered = merged.filter(evt => {
-    if (isExternal(evt)) return false
-    return evtInvolvesNames(evt, names)
-  })
 
+  const localsFiltered = locals.filter(evt => evtInvolvesNames(evt, names))
   const calMap = new Map(listCalendars().map(c => [c.id, new Set(c.assignedMemberIds || [])]))
-  const externalsFiltered = merged.filter(evt => {
-    const idCal = (evt as any)._calendarId as string | undefined
-    if (!idCal) return false
-    const set = calMap.get(idCal); if (!set) return false
+  const externalsFiltered = withShadows.filter(evt => {
+    const id = (evt as any)._calendarId as string | undefined
+    if (!id) return false
+    const set = calMap.get(id); if (!set) return false
     for (const m of set) if (linkedIds.has(m)) return true
     return false
   })
@@ -165,44 +129,30 @@ function canWrite(u: ReturnType<typeof currentUser>, before: EventRecord | null,
   return false
 }
 
-export function upsertEvent(evt: EventRecord, scope?: 'single'|'following'|'series'): EventRecord {
-  // ---------- EXTERNAL EDITS: local shadow + tombstone ----------
+export function upsertEvent(evt: EventRecord): EventRecord {
+  // External edits route: allow only if that calendar has allowEditLocal=true, otherwise block.
   if (isExternal(evt)) {
-    const { calId, uid } = getExtIdentityLocal(evt as any)
+    const calId = (evt as any)._calendarId as string | undefined
     const cal = calId ? listCalendars().find(c => c.id === calId) : undefined
     if (!cal || !cal.allowEditLocal) {
       toast('This event is from an external calendar. Enable “Allow editing (local)” in Integrations to edit it.')
       return evt
     }
-
-    const prevStart = (evt as any)._prevStart as string | undefined
-    const newKey = toExtKey(evt as any)
-    const oldKey = (prevStart && calId && uid) ? `${calId}::${uid}::${prevStart}` : newKey
-
-    const shadows = readShadows()
-
-    // 1) Tombstone the old provider instance (hide original at its previous time)
-    if (oldKey && prevStart && newKey && newKey !== oldKey) {
-      const idxOld = shadows.findIndex(s => s.extKey === oldKey && (s as any).source === 'tombstone')
-      const tomb: Tombstone = { source: 'tombstone', extKey: oldKey, shadowAt: new Date().toISOString() }
-      if (idxOld >= 0) shadows[idxOld] = tomb; else shadows.push(tomb)
+    const key = toExtKey(evt)
+    if (key) {
+      const shadows = readShadows()
+      const baseShadow: Shadow = { ...(evt as any), source: 'shadow', extKey: key, shadowOf: String(evt.id), shadowAt: new Date().toISOString() }
+      const idx = shadows.findIndex(s => s.extKey === key)
+      if (idx >= 0) shadows[idx] = baseShadow; else shadows.push(baseShadow)
+      writeShadows(shadows)
+      return evt
     }
-
-    // 2) Shadow for the (possibly moved) event at its new time
-    if (newKey) {
-      const baseShadow = { ...(evt as any), source: 'shadow', extKey: newKey, shadowOf: String(evt.id), shadowAt: new Date().toISOString() }
-      const idx = shadows.findIndex(s => s.extKey === newKey && (s as any).source === 'shadow')
-      if (idx >= 0) shadows[idx] = baseShadow as Shadow; else shadows.push(baseShadow as Shadow)
-    }
-
-    writeShadows(shadows)
-    return evt
   }
 
-  // Local edits (and all non-external) → baseline with Slice C guards
-  if (!featureAuthEnabled()) { const saved = (base as any).upsertEvent(evt, scope); emitChanged(); return saved }
+  // Local edits (and everything else) → baseline with Slice C guards
+  if (!featureAuthEnabled()) { const saved = base.upsertEvent(evt); emitChanged(); return saved }
   const u = currentUser()
-  if (!u) { const saved = (base as any).upsertEvent(evt, scope); emitChanged(); return saved }
+  if (!u) { const saved = base.upsertEvent(evt); emitChanged(); return saved }
 
   if (u.role === 'child') { toast('Children cannot change events.'); return evt }
   if (u.role === 'adult') {
@@ -210,18 +160,18 @@ export function upsertEvent(evt: EventRecord, scope?: 'single'|'following'|'seri
     const before = all.find(e => e && e.id === evt.id) || null
     if (!canWrite(u, before, evt)) { toast('You can only change events that involve your linked members.'); return evt }
   }
-  const saved = (base as any).upsertEvent(evt, scope); emitChanged(); return saved
+  const saved = base.upsertEvent(evt); emitChanged(); return saved
 }
 
 export function deleteEvent(id: string): void {
-  // Remove shadow/tombstone if exists
+  // If this is a shadow id or represents a shadowed external, remove the shadow (revert)
   const shadows = readShadows()
-  const idx = shadows.findIndex(s => (s as any).id === id || (s as any).shadowOf === id)
+  const idx = shadows.findIndex(s => s.id === id || s.shadowOf === id)
   if (idx >= 0) { shadows.splice(idx, 1); writeShadows(shadows); return }
 
-  if (!featureAuthEnabled()) { (base as any).deleteEvent(id); emitChanged(); return }
+  if (!featureAuthEnabled()) { base.deleteEvent(id); emitChanged(); return }
   const u = currentUser()
-  if (!u) { (base as any).deleteEvent(id); emitChanged(); return }
+  if (!u) { base.deleteEvent(id); emitChanged(); return }
 
   if (u.role === 'child') { toast('Children cannot delete events.'); return }
   if (u.role === 'adult') {
@@ -229,12 +179,11 @@ export function deleteEvent(id: string): void {
     const before = all.find(e => e && e.id === id) || null
     if (!canWrite(u, before, null)) { toast('You can only delete events that involve your linked members.'); return }
   }
-  (base as any).deleteEvent(id); emitChanged()
+  base.deleteEvent(id); emitChanged()
 }
 
-/* NOTE: We intentionally do NOT re-export base.list / base.listRange because your base file
-   doesn’t export them in this build, which caused the Vite error. Keep imports using listExpanded. */
-
+export const list      = (base as any).list      as typeof base.list
+export const listRange = (base as any).listRange as typeof base.listRange
 export * from './events'
 
 // Reactive bridge
