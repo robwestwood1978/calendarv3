@@ -40,10 +40,11 @@ export function matchQuery(e: EventRecord, q: string): boolean {
     ...(e.attendees || []),
     ...(e.checklist || []),
   ].join(' ').toLowerCase()
-  return hay.includes((q || '').toLowerCase())
+  const needle = (q || '').toLowerCase().trim()
+  return hay.includes(needle)
 }
 
-/* ----------------------------- mutations ---------------------------------- */
+/* ----------------- upsert / delete ----------------- */
 
 export function upsertEvent(e: EventRecord, mode: EditMode): void {
   const all = loadEvents()
@@ -72,7 +73,9 @@ export function upsertEvent(e: EventRecord, mode: EditMode): void {
   const baseEvt = idx >= 0 ? all[idx] : undefined
   if (!baseEvt) { all.push(normalizeEvent(e)); saveEvents(all); return }
 
-  const occKey = makeOverrideKey(DateTime.fromISO(e.start))
+  // IMPORTANT: For occurrence edits, key by the ORIGINAL occurrence time if provided.
+  const __prevStart = (e as any)._prevStart as string | undefined
+  const occKey = makeOverrideKey(DateTime.fromISO(__prevStart || e.start))
 
   if (mode === 'single') {
     baseEvt.overrides = baseEvt.overrides || {}
@@ -89,7 +92,9 @@ export function upsertEvent(e: EventRecord, mode: EditMode): void {
   }
 
   if (mode === 'following') {
-    const splitStart = DateTime.fromISO(e.start)
+    // Split at ORIGINAL occurrence time if provided
+    const __prevStart = (e as any)._prevStart as string | undefined
+    const splitStart = DateTime.fromISO(__prevStart || e.start)
     const untilStr = formatUntil(splitStart.minus({ seconds: 1 }))
     const old = { ...baseEvt }
 
@@ -100,10 +105,11 @@ export function upsertEvent(e: EventRecord, mode: EditMode): void {
 
     const newSeries: EventRecord = normalizeEvent({
       ...e,
-      id: `e_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+      id: undefined,
+      start: e.start,
+      rrule: rebuildRRuleFrom(baseEvt.rrule || '', DateTime.fromISO(e.start)),
       overrides: {},
       exdates: [],
-      rrule: rebuildRRuleFrom(baseEvt.rrule || '', splitStart),
     })
 
     all[idx] = normalizeEvent(old)
@@ -113,24 +119,37 @@ export function upsertEvent(e: EventRecord, mode: EditMode): void {
   }
 }
 
-export function deleteEvent(e: EventRecord, mode: EditMode) {
+export function deleteEvent(evt: EventRecord, mode: EditMode) {
   const all = loadEvents()
-  const idx = e.id ? all.findIndex(x => x.id === e.id) : -1
+  const idx = evt.id ? all.findIndex(x => x.id === evt.id) : -1
   if (idx < 0) return
 
-  if (!e.rrule || mode === 'series') {
+  if (!evt.rrule || mode === 'series') {
     all.splice(idx, 1)
     saveEvents(all)
     return
   }
 
-  const occKey = makeOverrideKey(DateTime.fromISO(e.start))
-  all[idx].exdates = all[idx].exdates || []
-  if (!all[idx].exdates!.includes(occKey)) all[idx].exdates!.push(occKey)
-  saveEvents(all)
-}
+  const baseEvt = all[idx]
+  const occKey = makeOverrideKey(DateTime.fromISO(evt.start))
 
-/* ----------------------------- helpers ---------------------------------- */
+  if (mode === 'single') {
+    baseEvt.exdates = baseEvt.exdates || []
+    if (!baseEvt.exdates.includes(occKey)) baseEvt.exdates.push(occKey)
+    saveEvents(all)
+    return
+  }
+
+  if (mode === 'following') {
+    const splitStart = DateTime.fromISO(evt.start)
+    const untilStr = formatUntil(splitStart.minus({ seconds: 1 }))
+    baseEvt.rrule = upsertUntil(baseEvt.rrule || '', untilStr)
+    baseEvt.exdates = baseEvt.exdates || []
+    if (!baseEvt.exdates.includes(occKey)) baseEvt.exdates.push(occKey)
+    saveEvents(all)
+    return
+  }
+}
 
 function normalizeEvent(e: EventRecord): EventRecord {
   return {
