@@ -131,7 +131,14 @@ function DayColumn({
         window.removeEventListener('mouseup', onUpDoc)
         setDrag(prev => {
           if (prev && prev.key === key && prev.type === 'move' && prev.deltaMin !== 0) {
-            onCommitChange({ ...ev, start: s0.plus({ minutes: prev.deltaMin }).toISO()!, end: e0.plus({ minutes: prev.deltaMin }).toISO()! })
+            // >>> Minimal change: carry ORIGINAL occurrence start for overrides/tombstones
+            onCommitChange({
+              ...ev,
+              _prevStart: ev.start,
+              start: s0.plus({ minutes: prev.deltaMin }).toISO()!,
+              end:   e0.plus({ minutes: prev.deltaMin }).toISO()!,
+            } as any)
+            // <<<
           }
           return null
         })
@@ -150,7 +157,13 @@ function DayColumn({
         setDrag(prev => {
           if (prev && prev.key === key && prev.type === 'resize' && prev.deltaMin !== 0) {
             const newEnd = e0.plus({ minutes: prev.deltaMin })
-            onCommitChange({ ...ev, end: (newEnd > s0 ? newEnd : s0.plus({ minutes: SNAP_MINUTES })).toISO()! })
+            // >>> Minimal change: carry ORIGINAL occurrence start for overrides/tombstones
+            onCommitChange({
+              ...ev,
+              _prevStart: ev.start,
+              end: (newEnd > s0 ? newEnd : s0.plus({ minutes: SNAP_MINUTES })).toISO()!,
+            } as any)
+            // <<<
           }
           return null
         })
