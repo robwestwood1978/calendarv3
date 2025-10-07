@@ -14,9 +14,9 @@
   --shadow: 0 4px 16px rgba(2, 6, 23, 0.08);
 
   /* Controls */
-  --head-h: 34px;        /* unified header height for gutter/day columns */
-  --hour-h: 60px;        /* default hour height; overridden inline for density */
-  --font-scale: 1;       /* hook if you add font scaling later */
+  --head-h: 34px;
+  --hour-h: 60px;
+  --font-scale: 1;
 }
 
 .theme-dark {
@@ -136,9 +136,8 @@ button.primary:hover { filter: brightness(0.96); }
   overflow: hidden;
 }
 
-/* Gutter on the left with aligned header spacer */
 .time-gutter {
-  flex: 0 0 66px; /* leaves space so events never overlap the times */
+  flex: 0 0 66px;
   border-right: 1px solid var(--border);
   background: var(--panel-2);
 }
@@ -158,20 +157,17 @@ button.primary:hover { filter: brightness(0.96); }
   justify-content: flex-end;
 }
 
-/* Ensure day columns render horizontally */
 .grid-days {
-  display: grid;              /* gridTemplateColumns set inline by React */
-  overflow: auto;             /* scroll grid area, not the gutter */
+  display: grid;
+  overflow: auto;
 }
 
-/* Each day column */
 .day-col {
   position: relative;
   border-left: 1px solid var(--border);
-  background: none;           /* hour lines live on .day-stack */
+  background: none;
 }
 
-/* Sticky header on each day column */
 .day-head {
   height: var(--head-h);
   display: flex;
@@ -188,59 +184,65 @@ button.primary:hover { filter: brightness(0.96); }
 .day-name { font-weight: 700; }
 .day-date { color: var(--muted); font-size: .85rem; }
 
-/* The scrolling stack that holds events and the hour grid background */
-.day-stack {
-  position: relative;
-  height: calc(24 * var(--hour-h)); /* actual hour height is set inline */
-  /* Hour lines are applied inline to respect density; this fallback is fine */
-  background-image: linear-gradient(to bottom, transparent calc(var(--hour-h) - 1px), var(--border) var(--hour-h));
-  background-size: 100% var(--hour-h);
+/* The scrolling area that holds events and hour rows */
+.day-body {
+  position: relative;                 /* establishes positioning for .event */
+  height: calc(24 * var(--hour-h));
+  background: transparent;
 }
 
-/* Event card */
-.event {
+/* Hour grid rows (beneath events) */
+.day-body .hour-row {
+  height: var(--hour-h);
+  border-top: 1px solid #eef2f7;
+}
+
+/* Event card (unchanged visual from this package) */
+.timewrap .event {
   position: absolute;
   left: 8px;
   right: 8px;
+  background: #fff;
+  color: var(--text);
   border-radius: 12px;
-  padding: 6px 8px 8px;
-  color: #fff;
-  font-size: .8rem;
-  user-select: none;
   box-shadow: var(--shadow);
-  display: grid;
-  grid-template-rows: 6px auto 6px;
+  border-left: 3px solid var(--primary);
+  padding: 6px 8px 10px 8px;
+  user-select: none;
+  cursor: pointer;
+  z-index: 1000;
+  overflow: hidden;
 }
 
-.event .event-body { min-height: 22px; }
-.event .title {
-  font-weight: 700;
-  letter-spacing: .2px;
+.timewrap .event .evt-title {
+  font-weight: 600;
+  font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  color: var(--text);
+  position: relative;
+  z-index: 2;
 }
-.event .time { font-size: .72rem; opacity: .92; }
 
-/* Drag/resize handles */
-.drag-handle {
-  cursor: move;
-  width: 100%;
+.timewrap .event .evt-resize {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 4px;
   height: 6px;
-  border-radius: 6px 6px 0 0;
-  background: rgba(255,255,255,.35);
-  transition: background .15s;
-}
-.resize-handle {
+  border-radius: 999px;
+  background: rgba(0,0,0,0.08);
   cursor: ns-resize;
-  width: 100%;
-  height: 6px;
-  border-radius: 0 0 6px 6px;
-  background: rgba(255,255,255,.35);
-  transition: background .15s;
+  z-index: 2;
 }
-.event:hover .drag-handle,
-.event:hover .resize-handle { background: rgba(255,255,255,.5); }
+
+/* IMPORTANT: remove any legacy pseudo-element masks on events */
+.timewrap .event::before,
+.timewrap .event::after {
+  content: none !important;
+  display: none !important;
+}
 
 /* ==================== Month Grid ==================== */
 .month-grid {
@@ -267,34 +269,32 @@ button.primary:hover { filter: brightness(0.96); }
   color: var(--muted);
 }
 
-.mlist { display: flex; flex-direction: column; gap: 4px; }
+.mitems { display: grid; gap: 2px; }
 
-.mitem {
+.mall, .mtimed {
   display: flex;
-  justify-content: space-between;
   align-items: center;
   gap: 6px;
-  font-size: .75rem;
-  background: #e0f2fe;
-  color: #0c4a6e;
-  border: 1px solid #cdeafe;
-  border-radius: 8px;
-  padding: 4px 6px;
-  transition: transform .04s ease, background-color .15s ease, filter .15s;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  padding: 2px;
+  cursor: pointer;
 }
-.mitem:hover { transform: translateY(-1px); }
-.mtitle { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.mtime { color: #075985; font-variant-numeric: tabular-nums; }
+
+.mtimed .dot, .mall .dot {
+  width: 8px; height: 8px; border-radius: 999px;
+}
 
 /* ==================== Modal ==================== */
 .modal-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(2, 6, 23, 0.55);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 50;
+  position: fixed !important;
+  inset: 0 !important;
+  background: rgba(2, 6, 23, 0.55) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  z-index: 2147483000 !important;     /* ABOVE EVERYTHING */
 }
 
 .modal {
@@ -307,6 +307,7 @@ button.primary:hover { filter: brightness(0.96); }
   flex-direction: column;
   border: 1px solid var(--border);
   box-shadow: var(--shadow);
+  max-height: 92vh; /* keep footer visible */
 }
 
 .modal.modern .modal-h,
@@ -319,6 +320,7 @@ button.primary:hover { filter: brightness(0.96); }
   justify-content: space-between;
   align-items: center;
   border-bottom: 1px solid var(--border);
+  z-index: 2147483001;
 }
 .modal-f { border-top: 1px solid var(--border); border-bottom: none; }
 
@@ -327,6 +329,9 @@ button.primary:hover { filter: brightness(0.96); }
   display: flex;
   flex-direction: column;
   gap: .75rem;
+  flex: 1 1 auto;
+  min-height: 0;              /* allow flex child to shrink */
+  overflow-y: auto;           /* scroll body; keep header/footer fixed */
 }
 
 .modal-b label {
@@ -414,7 +419,8 @@ button.primary:hover { filter: brightness(0.96); }
 /* ==================== Misc ==================== */
 .hint { font-size: .78rem; color: var(--muted); }
 button:disabled { opacity: .55; cursor: not-allowed; }
-/* --- Bottom nav --- */
+
+/* Bottom nav (single, non-duplicated block) */
 .bottom-nav {
   position: fixed;
   bottom: 12px;
@@ -441,30 +447,14 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   color: #fff;
   border-color: var(--primary);
 }
-/* --- Bottom nav (ensure present) --- */
-.bottom-nav {
-  position: fixed;
-  bottom: 12px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  display: flex;
-  gap: .25rem;
-  padding: .25rem;
-  box-shadow: var(--shadow);
-  z-index: 40;
-}
-.nav-btn {
-  padding: .45rem .8rem;
-  border-radius: 12px;
-  color: var(--text);
-  text-decoration: none;
-  border: 1px solid transparent;
-}
-.nav-btn.active {
-  background: var(--primary);
-  color: #fff;
-  border-color: var(--primary);
+
+/* Final guard: no pseudo/overlay on calendar events */
+.timewrap .event::before,
+.timewrap .event::after,
+.timewrap .event *::before,
+.timewrap .event *::after {
+  content: none !important;
+  display: none !important;
+  background: none !important;
+  box-shadow: none !important;
 }
