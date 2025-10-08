@@ -1,143 +1,201 @@
 // frontend/src/pages/Calendar.tsx
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useMemo, useState } from 'react'
 import { DateTime } from 'luxon'
-import EventModal from '../components/EventModal'
 import { TimeGrid, MonthGrid } from '../components/EventGrid'
-import { upsertEvent, deleteEvent } from '../state/events-agenda'
-import CalendarLegend from '../components/calendar/CalendarLegend'
+import EventModal from '../components/EventModal'
 import type { EventRecord } from '../lib/recurrence'
+
+import { useSettings } from '../state/settings'
+import { isExternal, isShadow } from '../lib/external'
+
+// Local events (baseline)
+import { upsertEvent as upsertLocalEvent, deleteEvent as deleteLocalEvent } from '../state/events'
+
+// External agenda/shadows
+import { upsertEvent as upsertAgendaEvent, deleteEvent as deleteAgendaEvent } from '../state/events-agenda'
 
 type View = 'day' | '3day' | 'week' | 'month'
 
 export default function CalendarPage() {
+  const settings = useSettings()
+  const { timezone, allowEditing } = settings
+
   const [view, setView] = useState<View>('week')
-  const [cursor, setCursor] = useState(DateTime.local())
-  const [modalOpen, setModalOpen] = useState(false)
-  const [selected, setSelected] = useState<EventRecord | undefined>()
+  const [cursor, setCursor] = useState(DateTime.local().setZone(timezone).startOf('day'))
   const [query, setQuery] = useState('')
-  const [version, setVersion] = useState(0)
 
-  useEffect(() => {
-    const bump = () => setVersion(v => v + 1)
-    window.addEventListener('fc:events-changed', bump)
-    return () => window.removeEventListener('fc:events-changed', bump)
-  }, [])
+  // modal state
+  const [open, setOpen] = useState(false)
+  const [editing, setEditing] = useState<EventRecord | undefined>(undefined)
 
-  const hasAny = useMemo(() => {
-    try {
-      return !!(localStorage.getItem('fc_events_v1') && JSON.parse(localStorage.getItem('fc_events_v1') || '[]').length)
-    } catch { return false }
-  }, [modalOpen, version])
+  const next = () => setCursor(v => view === 'month' ? v.plus({ months: 1 }) :
+                                       view === 'week'  ? v.plus({ weeks: 1 })  :
+                                       view === '3day' ? v.plus({ days: 3 })    :
+                                                         v.plus({ days: 1 }))
+  const prev = () => setCursor(v => view === 'month' ? v.minus({ months: 1 }) :
+                                       view === 'week'  ? v.minus({ weeks: 1 })  :
+                                       view === '3day' ? v.minus({ days: 3 })    :
+                                                         v.minus({ days: 1 }))
+  const today = () => setCursor(DateTime.local().setZone(timezone).startOf('day'))
 
-  const openNew = (dt: DateTime) => {
-    setSelected({
+  const title = useMemo(() => {
+    if (view === 'month') return cursor.toFormat('LLLL yyyy')
+    if (view === 'week') {
+      const a = cursor.startOf('week'), b = cursor.endOf('week')
+      return `${a.toFormat('d LLL')} – ${b.toFormat('d LLL yyyy')}`
+    }
+    if (view === '3day') {
+      const b = cursor.plus({ days: 2 })
+      return `${cursor.toFormat('ccc d LLL')} – ${b.toFormat('ccc d LLL yyyy')}`
+    }
+    return cursor.toFormat('cccc d LLL yyyy')
+  }, [cursor.toISO(), view])
+
+  /* ----------------- Core actions ----------------- */
+
+  const openNewAt = (start: DateTime) => {
+    const end = start.plus({ minutes: settings.defaults.durationMin })
+    setEditing({
+      id: undefined as any, // created on save
       title: '',
-      start: dt.toISO(),
-      end: dt.plus({ hours: 1 }).toISO(),
+      start: start.toISO(),
+      end: end.toISO(),
+      allDay: false,
+      attendees: [],
       tags: [],
       checklist: [],
+      colour: settings.defaults.colour,
     } as EventRecord)
-    setModalOpen(true)
+    setOpen(true)
   }
 
-  const handleSave = (evt: EventRecord, mode: 'single' | 'following' | 'series') => {
-    upsertEvent(evt, mode)
-    setModalOpen(false)
+  const openEdit = (evt: EventRecord) => {
+    setEditing(evt)
+    setOpen(true)
   }
 
-  // When moving/resizing a recurring event, ask scope
-  const saveMoveOrResize = (evt: EventRecord) => {
-    if (!evt.rrule) { upsertEvent(evt, 'series'); return }
-    const choice = window.prompt(
-      'Apply move/resize to:\n1 = This occurrence\n2 = This and following\n3 = Entire series',
-      '1'
-    )
-    const mode = choice === '3' ? 'series' : choice === '2' ? 'following' as const : 'single' as const
-    upsertEvent(evt, mode)
+  /**
+   * Drag/resize commit coming from the grid.
+   * - Respect "Allow editing"
+   * - External: save via agenda/shadow layer (requires _prevStart)
+   * - Local recurring: include _prevStart so single-occurrence edits stick
+   */
+  const onMoveOrResize = (evt: EventRecord) => {
+    const external = isExternal(evt) || isShadow(evt)
+
+    if (!allowEditing) {
+      // When editing is disabled, don't mutate; open the modal to view.
+      setEditing(evt)
+      setOpen(true)
+      return
+    }
+
+    // Normalize: if the grid didn't add _prevStart (should be set), set it when start changed.
+    const withPrev = (() => {
+      if ((evt as any)._prevStart) return evt
+      if (editing && editing.id === evt.id && editing.start && editing.start !== evt.start) {
+        return { ...evt, _prevStart: editing.start } as any
+      }
+      return evt
+    })()
+
+    if (external) {
+      // Save shadow and tombstone original occurrence
+      upsertAgendaEvent(withPrev)
+      return
+    }
+
+    // Local event
+    // If it’s part of a series (has rrule), treat grid move as "single occurrence" edit by carrying _prevStart.
+    if (withPrev.rrule) {
+      upsertLocalEvent(withPrev as any, 'single')
+    } else {
+      upsertLocalEvent(withPrev as any, 'series')
+    }
   }
 
-  const prev = () => {
-    if (view === 'day') setCursor(cursor.minus({ days: 1 }))
-    else if (view === '3day') setCursor(cursor.minus({ days: 3 }))
-    else if (view === 'week') setCursor(cursor.minus({ weeks: 1 }))
-    else if (view === 'month') setCursor(cursor.minus({ months: 1 }))
-  }
-  const next = () => {
-    if (view === 'day') setCursor(cursor.plus({ days: 1 }))
-    else if (view === '3day') setCursor(cursor.plus({ days: 3 }))
-    else if (view === 'week') setCursor(cursor.plus({ weeks: 1 }))
-    else if (view === 'month') setCursor(cursor.plus({ months: 1 }))
-  }
-  const today = () => setCursor(DateTime.local())
+  /**
+   * Save from modal (local + external).
+   * EventModal already adds `_prevStart` when the start changes.
+   */
+  const onSaveFromModal = (evt: EventRecord, editScope: 'single' | 'following' | 'series') => {
+    const external = isExternal(evt) || isShadow(evt)
 
-  const rangeLabel = () => {
-    if (view === 'day') return cursor.toFormat('cccc d LLL yyyy')
-    if (view === '3day') return `${cursor.toFormat('d LLL')} – ${cursor.plus({ days: 2 }).toFormat('d LLL yyyy')}`
-    if (view === 'week') return `${cursor.startOf('week').toFormat('d LLL')} – ${cursor.endOf('week').toFormat('d LLL yyyy')}`
-    if (view === 'month') return cursor.toFormat('LLLL yyyy')
+    if (!allowEditing) {
+      // No-op when editing disabled
+      setOpen(false)
+      setEditing(undefined)
+      return
+    }
+
+    if (external) {
+      upsertAgendaEvent(evt)
+      setOpen(false); setEditing(undefined)
+      return
+    }
+
+    upsertLocalEvent(evt, evt.rrule ? editScope : 'series')
+    setOpen(false); setEditing(undefined)
   }
+
+  const onDeleteFromModal = (evt: EventRecord) => {
+    const external = isExternal(evt) || isShadow(evt)
+    if (external) deleteAgendaEvent(evt.id as any)
+    else deleteLocalEvent(evt)
+    setOpen(false); setEditing(undefined)
+  }
+
+  /* ----------------- Render ----------------- */
 
   return (
-    <div className="calendar-page" data-v={version}>
-      <header className="toolbar">
-        <CalendarLegend />
+    <div className="calendar-page">
+      <div className="toolbar">
         <div className="left">
-          <button onClick={prev} title="Previous">‹</button>
-          <button onClick={today} title="Today">Today</button>
-          <button onClick={next} title="Next">›</button>
+          <button onClick={prev} aria-label="Previous">⟨</button>
+          <button onClick={today}>Today</button>
+          <button onClick={next} aria-label="Next">⟩</button>
         </div>
-        <div className="center">{rangeLabel()}</div>
+        <div className="center">{title}</div>
         <div className="right">
           <select value={view} onChange={e => setView(e.target.value as View)}>
             <option value="day">Day</option>
-            <option value="3day">3 days</option>
+            <option value="3day">3 Days</option>
             <option value="week">Week</option>
             <option value="month">Month</option>
           </select>
-          <input placeholder="Search…" value={query} onChange={e => setQuery(e.target.value)} />
-          <button className="primary" onClick={() => openNew(DateTime.local().startOf('hour'))}>+ Add event</button>
-        </div>
-      </header>
-
-      {!hasAny && (
-        <div className="empty-state">
-          <div>
-            <h4>Welcome 👋</h4>
-            <p>Click <strong>+ Add event</strong> or <strong>double-click</strong> the calendar to create your first event.</p>
-          </div>
-        </div>
-      )}
-
-      <main className="main">
-        {view === 'month' ? (
-          <MonthGrid
-            cursor={cursor}
-            query={query}
-            onNewAt={openNew}
-            onEdit={e => { setSelected(e); setModalOpen(true) }}
-            key={`m-${version}-${cursor.toISODate()}`}
+          <input
+            placeholder="Search title or tag…"
+            value={query}
+            onChange={e => setQuery(e.target.value)}
           />
-        ) : (
-          <TimeGrid
-            view={view}
-            cursor={cursor}
-            query={query}
-            onNewAt={openNew}
-            onEdit={e => { setSelected(e); setModalOpen(true) }}
-            onMoveOrResize={saveMoveOrResize}
-            key={`t-${version}-${view}-${cursor.startOf('week').toISODate()}`}
-          />
-        )}
-      </main>
+        </div>
+      </div>
 
-      {modalOpen && (
-        <EventModal
-          open={modalOpen}
-          initial={selected}
-          onClose={() => setModalOpen(false)}
-          onSave={handleSave}
+      {view === 'month' ? (
+        <MonthGrid
+          cursor={cursor}
+          query={query}
+          onNewAt={openNewAt}
+          onEdit={openEdit}
+        />
+      ) : (
+        <TimeGrid
+          view={view as 'day' | '3day' | 'week'}
+          cursor={cursor}
+          query={query}
+          onNewAt={openNewAt}
+          onEdit={openEdit}
+          onMoveOrResize={onMoveOrResize}
         />
       )}
+
+      {/* Modal */}
+      <EventModal
+        open={open}
+        initial={editing}
+        onClose={() => { setOpen(false); setEditing(undefined) }}
+        onSave={onSaveFromModal}
+      />
     </div>
   )
 }
