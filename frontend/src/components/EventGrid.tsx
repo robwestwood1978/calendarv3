@@ -1,4 +1,4 @@
-import React, { useRef, useState, useMemo, useCallback } from 'react'
+import React, { useRef, useState, useMemo, useCallback, useEffect } from 'react'
 import { DateTime } from 'luxon'
 import { listExpanded } from '../state/events-agenda'
 import type { EventRecord } from '../lib/recurrence'
@@ -16,16 +16,32 @@ interface GridProps {
 const SNAP_MINUTES = 15
 const CLICK_DRAG_THRESHOLD_PX = 3
 
-/* ------------- Toast helper ------------- */
 function toast(msg: string) {
   try { window.dispatchEvent(new CustomEvent('toast', { detail: msg })) } catch {}
+}
+
+/** subscribe to store changes so grids re-compute immediately after saves */
+function useAgendaChangeTick() {
+  const [tick, setTick] = useState(0)
+  useEffect(() => {
+    const bump = () => setTick(t => t + 1)
+    // emitted by local + shadow writes
+    window.addEventListener('fc:events-changed', bump)
+    // storage sync across tabs
+    window.addEventListener('storage', bump)
+    return () => {
+      window.removeEventListener('fc:events-changed', bump)
+      window.removeEventListener('storage', bump)
+    }
+  }, [])
+  return tick
 }
 
 export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize }: GridProps) {
   const settings = useSettings()
   const hourHeight = settings.denseHours ? 44 : 60
 
-  // Compute the time range for this grid
+  // grid range
   const start = useMemo(
     () => (view === 'week' ? cursor.startOf('week') : cursor),
     [view, cursor.toISO()]
@@ -33,17 +49,20 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
   const days = view === '3day' ? 3 : view === 'day' ? 1 : 7
   const end = useMemo(() => start.plus({ days }), [start.toISO(), days])
 
-  // Expand events once per range/query
+  // subscribe to agenda changes
+  const tick = useAgendaChangeTick()
+
+  // expand events when view range, query, or store "tick" changes
   const events = useMemo(
     () => listExpanded(start.startOf('day'), end.endOf('day'), query),
-    [start.toISO(), end.toISO(), query]
+    [start.toISO(), end.toISO(), query, tick]
   )
   const safeEvents = useMemo(
     () => events.filter(e => DateTime.fromISO(e.start).isValid && DateTime.fromISO(e.end).isValid),
     [events]
   )
 
-  // Columns for days + scroll sync refs
+  // columns + scroll sync
   const cols = useMemo(() => Array.from({ length: days }, (_, i) => start.plus({ days: i })), [days, start.toISO()])
   const gutterRef = useRef<HTMLDivElement>(null)
   const daysRef = useRef<HTMLDivElement>(null)
@@ -52,7 +71,6 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
     const g = gutterRef.current
     const d = daysRef.current
     if (!g || !d) return
-    // micro-throttle via requestAnimationFrame
     if ((onDaysScroll as any)._raf) return
     ;(onDaysScroll as any)._raf = requestAnimationFrame(() => {
       g.scrollTop = d.scrollTop
@@ -70,7 +88,7 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
 
   return (
     <div className="timewrap" style={{ ['--head-h' as any]: '34px' }}>
-      {/* Gutter with its own scroller; we will sync it to daysRef */}
+      {/* Scroll-synced gutter */}
       <div className="time-gutter" aria-hidden="true" ref={gutterRef} style={{ overflowY: 'auto' }}>
         <div className="time-head" />
         {Array.from({ length: 24 }).map((_, h) => (
@@ -132,7 +150,7 @@ function DayColumn({
   const lastDraggedKeyRef = useRef<string | null>(null)
   const clearClickBlockSoon = (key: string) => {
     lastDraggedKeyRef.current = key
-    setTimeout(() => { if (lastDraggedKeyRef.current === key) lastDraggedKeyRef.current = null }, 180)
+    setTimeout(() => { if (lastDraggedKeyRef.current === key) lastDraggedKeyRef.current = null }, 160)
   }
 
   const snap = (minutes: number) => Math.round(minutes / SNAP_MINUTES) * SNAP_MINUTES
@@ -185,12 +203,11 @@ function DayColumn({
         setDrag(prev => {
           const moved = !!dragMetaRef.current.moved
           if (prev && prev.key === key && prev.type === 'move' && prev.deltaMin !== 0) {
-            // Preserve original occurrence across re-edits (external + local recurring)
             const origOcc = (ev as any)._origOccStart || (ev as any)._prevStart || ev.start
             onCommitChange({
               ...ev,
-              _prevStart: ev.start as any,          // for your existing handlers
-              _origOccStart: origOcc as any,        // stable key across re-edits
+              _prevStart: ev.start as any,          // for existing series/shadow handlers
+              _origOccStart: origOcc as any,        // stable across re-edits
               start: s0.plus({ minutes: prev.deltaMin }).toISO()!,
               end: e0.plus({ minutes: prev.deltaMin }).toISO()!,
             } as any)
@@ -240,8 +257,7 @@ function DayColumn({
 
     const handleClick = (e: React.MouseEvent) => {
       e.stopPropagation()
-      // If we just dragged this key, ignore the click.
-      if (lastDraggedKeyRef.current === key) return
+      if (lastDraggedKeyRef.current === key) return // suppress click after drag
       onEdit(ev)
     }
 
