@@ -1,4 +1,3 @@
-// frontend/src/pages/Calendar.tsx
 import React, { useMemo, useState } from 'react'
 import { DateTime } from 'luxon'
 import { TimeGrid, MonthGrid } from '../components/EventGrid'
@@ -46,7 +45,7 @@ export default function CalendarPage() {
     }
     if (view === '3day') return `${cursor.toFormat('ccc d LLL')} – ${cursor.plus({ days: 2 }).toFormat('ccc d LLL yyyy')}`
     return cursor.toFormat('ccc d LLL yyyy')
-  }, [cursor, view])
+  }, [cursor.toISO(), view])
 
   const onNewAt = (start: DateTime) => {
     setEditing({
@@ -61,25 +60,26 @@ export default function CalendarPage() {
 
   const onEdit = (evt: EventRecord) => { setEditing(evt); setOpen(true) }
 
-  // Grid drag/resize commits — always persist; write-guards live in state layer
+  // Grid commits — always persist; write permission lives in state layers.
   const onMoveOrResize = (evt: EventRecord) => {
     const external = isExternal(evt) || isShadow(evt)
-    const withPrev = { ...evt, _prevStart: (evt as any)._prevStart || evt.start } as any
-    if (external) { upsertAgendaEvent(withPrev); return }
-    if (withPrev.rrule) upsertLocalEvent(withPrev, 'single'); else upsertLocalEvent(withPrev, 'series')
+    // Ensure stable original occurrence marker survives every grid edit:
+    const withOrig = { ...evt, _origOccStart: (evt as any)._origOccStart || (evt as any)._prevStart || evt.start } as any
+    if (external) { upsertAgendaEvent(withOrig); return }
+    if (withOrig.rrule) upsertLocalEvent(withOrig, 'single'); else upsertLocalEvent(withOrig, 'series')
   }
 
-  // Modal save
   const onSaveFromModal = (evt: EventRecord, editScope: 'single' | 'following' | 'series') => {
     const external = isExternal(evt) || isShadow(evt)
-    if (external) { upsertAgendaEvent(evt); setOpen(false); setEditing(undefined); return }
-    upsertLocalEvent(evt, evt.rrule ? editScope : 'series')
+    const withOrig = { ...evt, _origOccStart: (evt as any)._origOccStart || (evt as any)._prevStart || evt.start } as any
+    if (external) { upsertAgendaEvent(withOrig); setOpen(false); setEditing(undefined); return }
+    upsertLocalEvent(withOrig, withOrig.rrule ? editScope : 'series')
     setOpen(false); setEditing(undefined)
   }
 
   const onDeleteFromModal = (evt: EventRecord) => {
     const external = isExternal(evt) || isShadow(evt)
-    if (external) { deleteAgendaEvent(evt.id!); setOpen(false); setEditing(undefined); return }
+    if (external) { deleteAgendaEvent(evt); setOpen(false); setEditing(undefined); return }
     deleteLocalEvent(evt, evt.rrule ? 'series' : 'series')
     setOpen(false); setEditing(undefined)
   }
@@ -105,7 +105,6 @@ export default function CalendarPage() {
         </div>
       </div>
 
-      {/* Grids */}
       {view === 'month' ? (
         <MonthGrid cursor={cursor} query={query} onNewAt={onNewAt} onEdit={onEdit} />
       ) : (
