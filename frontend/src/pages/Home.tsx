@@ -1,16 +1,15 @@
 // frontend/src/pages/Home.tsx
 //
 // Restored "Now / Next / grouped-by-day" agenda.
-// - Shows ONLY current & future events (filters out anything that ended before 'now').
-// - Limits window to now → +8 weeks for speed.
-// - Subscribes to 'fc:events-changed' so edits reflect instantly.
-// - Keeps rendering cheap by precomputing formats.
+// - Shows ONLY current & future events (now → +8 weeks).
+// - Uses pickEventColour for accurate colours (respects rules).
+// - Subscribes to fc:events-changed for instant refresh.
 
 import React, { useMemo, useState, useEffect } from 'react'
 import { DateTime } from 'luxon'
 import { suggestHomeRange, listExpanded } from '../state/events-agenda'
 import type { EventRecord } from '../lib/recurrence'
-import { useSettings } from '../state/settings'
+import { useSettings, pickEventColour } from '../state/settings'
 
 type Group = { key: string; label: string; items: EventRecord[] }
 
@@ -27,7 +26,7 @@ export default function HomePage() {
   const [query, setQuery] = useState('')
   const [tick, setTick] = useState(0)
 
-  // Window: now → +8 weeks
+  // Window: now → +8 weeks (data layer also clamps)
   const { start, end } = useMemo(
     () => suggestHomeRange(DateTime.local().setZone(tz)),
     [tz]
@@ -44,20 +43,18 @@ export default function HomePage() {
     }
   }, [])
 
-  // Pull + slice to FUTURE ONLY (incl. "now running")
   const now = useMemo(() => DateTime.local().setZone(tz), [tz])
 
+  // Pull & enforce future-only here too (belt-and-braces)
   const all = useMemo(() => {
     const items = listExpanded(start, end, query)
-    // future-only: remove anything that ended before "now"
     return items.filter(e => DateTime.fromISO(e.end).setZone(tz) >= now)
-  }, [start.toISO(), end.toISO(), query, tick, now.toISO()])
+  }, [start.toISO(), end.toISO(), query, tick, now.toISO(), tz])
 
-  // Build groups: NOW (ongoing), NEXT (soon), then by-day buckets
+  // Build groups
   const { nowItems, nextItems, dayGroups } = useMemo(() => {
     const ongoing: EventRecord[] = []
     const upcoming: EventRecord[] = []
-    const rest: EventRecord[] = []
 
     for (const e of all) {
       const s = DateTime.fromISO(e.start).setZone(tz)
@@ -66,13 +63,11 @@ export default function HomePage() {
       else if (s > now) upcoming.push(e)
     }
 
-    // NEXT: first 3 upcoming (today-biased)
+    // NEXT = first 3 upcoming (bias to today automatically by sort order)
     const next = upcoming.slice(0, 3)
 
-    // Remaining after NEXT
-    const remaining = upcoming.slice(3)
-
     // Group remaining by day
+    const remaining = upcoming.slice(3)
     const byDayMap = new Map<string, EventRecord[]>()
     for (const e of remaining) {
       const dayKey = DateTime.fromISO(e.start).setZone(tz).startOf('day').toISO()
@@ -95,7 +90,7 @@ export default function HomePage() {
   return (
     <div className="admin" style={{ paddingTop: 12 }}>
       <div className="row between" style={{ marginBottom: 10 }}>
-        <h2 style={{ margin: 0 }}>My Agenda</h2>
+        <h2 style={{ margin: 0 }}>Upcoming</h2>
         <input
           placeholder="Search…"
           value={query}
@@ -108,7 +103,7 @@ export default function HomePage() {
       {nowItems.length > 0 && (
         <section className="card" style={{ marginBottom: 12 }}>
           <div style={{ fontWeight: 700, marginBottom: 8 }}>Now</div>
-          {nowItems.map(e => <AgendaRow key={`${e.id}-${e.start}`} e={e} tz={tz} highlightNow />)}
+          {nowItems.map(e => <AgendaRow key={`${e.id}-${e.start}`} e={e} tz={tz} highlightNow settings={settings} />)}
         </section>
       )}
 
@@ -116,7 +111,7 @@ export default function HomePage() {
       {nextItems.length > 0 && (
         <section className="card" style={{ marginBottom: 12 }}>
           <div style={{ fontWeight: 700, marginBottom: 8 }}>Next</div>
-          {nextItems.map(e => <AgendaRow key={`${e.id}-${e.start}`} e={e} tz={tz} />)}
+          {nextItems.map(e => <AgendaRow key={`${e.id}-${e.start}`} e={e} tz={tz} settings={settings} />)}
         </section>
       )}
 
@@ -124,7 +119,7 @@ export default function HomePage() {
       {dayGroups.map(g => (
         <section key={g.key} className="card" style={{ marginBottom: 12 }}>
           <div style={{ fontWeight: 700, marginBottom: 8 }}>{g.label}</div>
-          {g.items.map(e => <AgendaRow key={`${e.id}-${e.start}`} e={e} tz={tz} />)}
+          {g.items.map(e => <AgendaRow key={`${e.id}-${e.start}`} e={e} tz={tz} settings={settings} />)}
         </section>
       ))}
 
@@ -135,10 +130,22 @@ export default function HomePage() {
   )
 }
 
-/* ---------- row component kept lightweight ---------- */
-function AgendaRow({ e, tz, highlightNow = false }: { e: EventRecord; tz: string; highlightNow?: boolean }) {
+/* ---------- row component (uses pickEventColour) ---------- */
+function AgendaRow({ e, tz, settings, highlightNow = false }: {
+  e: EventRecord
+  tz: string
+  settings: any
+  highlightNow?: boolean
+}) {
   const s = useMemo(() => DateTime.fromISO(e.start).setZone(tz), [e.start, tz])
   const en = useMemo(() => DateTime.fromISO(e.end).setZone(tz), [e.end, tz])
+  const colour = useMemo(() => pickEventColour({
+    baseColour: e.colour,
+    memberNames: e.attendees,
+    tags: e.tags,
+    rules: settings.colourRules,
+    memberLookup: settings.memberLookup,
+  }) || '#1e88e5', [e.colour, e.attendees, e.tags, settings.colourRules, settings.memberLookup])
 
   return (
     <div
@@ -149,7 +156,7 @@ function AgendaRow({ e, tz, highlightNow = false }: { e: EventRecord; tz: string
         background: highlightNow ? 'var(--primary-weak)' : 'transparent',
       }}
     >
-      <div style={{ width: 8, height: 8, borderRadius: 999, background: e.colour || '#1e88e5' }} />
+      <div style={{ width: 8, height: 8, borderRadius: 999, background: colour }} />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
           {e.title}
