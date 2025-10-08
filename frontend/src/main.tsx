@@ -36,6 +36,9 @@ import { AuthProvider } from './auth/AuthProvider'
 import { migrateSliceC } from './lib/migrateSliceC'
 import './styles.css'
 
+/* === NEW: global toaster so ?sync=on/off shows a message === */
+import Toaster from './components/Toaster'
+
 /* ===== Slice D: Sync bootstrap (additive, no UI changes) ===== */
 import { startSyncLoop, maybeRunSync } from './sync/bootstrap'
 import { readSyncConfig, writeSyncConfig } from './sync/core'
@@ -58,7 +61,6 @@ function handleSyncURLToggle() {
             accountKey: cfg.providers?.google?.accountKey,
             calendars: cfg.providers?.google?.calendars || [],
           },
-          // Apple adapter will be introduced in Slice D3; keep disabled for now.
           apple: {
             enabled: false,
             accountKey: cfg.providers?.apple?.accountKey,
@@ -70,13 +72,16 @@ function handleSyncURLToggle() {
       writeSyncConfig(next)
       url.searchParams.delete('sync')
       window.history.replaceState({}, '', url.toString())
+      // fire once now (may be before React mounts) and once after mount
       try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Cloud sync enabled (Google stub).' })) } catch {}
+      setTimeout(() => { try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Cloud sync enabled (Google stub).' })) } catch {} }, 500)
     } else if (sync === 'off') {
       const next = { ...cfg, enabled: false }
       writeSyncConfig(next)
       url.searchParams.delete('sync')
       window.history.replaceState({}, '', url.toString())
       try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Cloud sync disabled.' })) } catch {}
+      setTimeout(() => { try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Cloud sync disabled.' })) } catch {} }, 500)
     }
   } catch {
     // ignore
@@ -106,6 +111,9 @@ function RootApp() {
       <SettingsProvider>
         <AuthProvider>
           <BrowserRouter>
+            {/* Global toaster lives once for whole app */}
+            <Toaster />
+
             {/* Invisible: listens for account/link/toggle/flag changes */}
             <AgendaRefreshBridge onPulse={() => setPulse(p => (p + 1) % 1_000_000)} />
 
