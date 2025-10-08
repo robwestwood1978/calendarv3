@@ -1,12 +1,9 @@
 // frontend/src/state/events-agenda.ts
 //
-// Fast, filtered agenda data:
-// - Merges local events (base) with external feeds (integrations).
-// - Applies per-occurrence "shadows" for edited external items.
-// - Applies "My Agenda" and linked calendar filters by reading settings from localStorage.
-// - Provides an in-memory cache keyed by (start,end,query,scopeKey), auto-invalidated on writes.
-//
-// Drop-in replacement.
+// Fast agenda data with external shadows + in-memory cache.
+// IMPORTANT: Scope filtering (My Agenda / linked calendars) is DISABLED for now,
+// per request to avoid kiosk-mode confusion and performance regressions.
+// Re-enable later by flipping ENABLE_SCOPE_FILTER to true and wiring settings.
 
 import { DateTime } from 'luxon'
 import type { EventRecord } from '../lib/recurrence'
@@ -14,11 +11,14 @@ import * as base from './events'
 import { externalExpanded, listCalendars } from './integrations'
 import { isExternal, isShadow, toExtKey } from '../lib/external'
 
-/* -------------------- storage keys (read-only) -------------------- */
-const LS_SHADOWS   = 'fc_shadow_events_v1'
-const LS_SETTINGS  = 'fc_settings_v3'     // we read settings to derive "My Agenda" & calendar filters
+/* -------------------- feature flags -------------------- */
+const ENABLE_SCOPE_FILTER = false // << turn on later when ready
 
-/* -------------------- small utils -------------------- */
+/* -------------------- storage keys -------------------- */
+const LS_SHADOWS  = 'fc_shadow_events_v1'
+const LS_SETTINGS = 'fc_settings_v3' // read-only if you re-enable filters
+
+/* -------------------- utils -------------------- */
 function emitChanged() { try { window.dispatchEvent(new Event('fc:events-changed')) } catch {} }
 function toast(msg: string) { try { window.dispatchEvent(new CustomEvent('toast', { detail: msg })) } catch {} }
 function safeParse<T>(raw: string | null, fallback: T): T { if (!raw) return fallback; try { return JSON.parse(raw) as T } catch { return fallback } }
@@ -38,7 +38,7 @@ function readShadows(): Shadow[] { return safeParse(localStorage.getItem(LS_SHAD
 function writeShadows(arr: Shadow[]) { localStorage.setItem(LS_SHADOWS, JSON.stringify(arr)); emitChanged() }
 function shadowMap(): Map<string, Shadow> { const m = new Map<string, Shadow>(); for (const s of readShadows()) m.set(s.extKey, s); return m }
 
-/* -------------------- settings → scope filter -------------------- */
+/* -------------------- (optional) scope filtering shapes -------------------- */
 
 type Scope = {
   myAgendaEnabled: boolean
@@ -49,6 +49,16 @@ type Scope = {
 }
 
 function readScopeFromSettings(): Scope {
+  if (!ENABLE_SCOPE_FILTER) {
+    return {
+      myAgendaEnabled: false,
+      includeMemberNames: new Set(),
+      includeMemberIds: new Set(),
+      includeEmails: new Set(),
+      includeCalendarIds: new Set(),
+    }
+  }
+
   const s = safeParse<any>(localStorage.getItem(LS_SETTINGS), {})
   const myAg = s?.myAgenda || s?.agenda || {}
   const calFilter = s?.linkedCalendarIds || s?.calendarFilters?.includeIds || []
@@ -65,6 +75,7 @@ function readScopeFromSettings(): Scope {
 }
 
 function scopeKey(sc: Scope): string {
+  if (!ENABLE_SCOPE_FILTER) return 'OFF'
   return [
     sc.myAgendaEnabled ? '1' : '0',
     [...sc.includeMemberNames].sort().join(','),
@@ -75,35 +86,27 @@ function scopeKey(sc: Scope): string {
 }
 
 function eventMatchesScope(e: EventRecord, sc: Scope): boolean {
-  // If no scope at all → allow everything.
+  if (!ENABLE_SCOPE_FILTER) return true
   const hasAgendaFilter = sc.myAgendaEnabled && (sc.includeMemberNames.size || sc.includeMemberIds.size || sc.includeEmails.size)
   const hasCalendarFilter = sc.includeCalendarIds.size > 0
-
   if (!hasAgendaFilter && !hasCalendarFilter) return true
 
-  // Calendar filter: external items often carry _calendarId; for locals this is absent → locals pass unless you later decide otherwise.
   if (hasCalendarFilter) {
     const calId = (e as any)._calendarId as string | undefined
     if (calId && !sc.includeCalendarIds.has(calId)) return false
   }
-
   if (hasAgendaFilter) {
     const atts = (e.attendees || []).map(String)
-    // Names
     if (sc.includeMemberNames.size && atts.some(a => sc.includeMemberNames.has(a))) return true
-    // Emails
     if (sc.includeEmails.size && atts.some(a => sc.includeEmails.has(a))) return true
-    // Ids (some apps store attendees as ids in a parallel field)
     const attIds: string[] = ((e as any).attendeeIds || []) as string[]
     if (sc.includeMemberIds.size && attIds.some(id => sc.includeMemberIds.has(id))) return true
-    // No match → exclude
     return false
   }
-
   return true
 }
 
-/* -------------------- fast cache for expansions -------------------- */
+/* -------------------- cache -------------------- */
 
 type CacheKey = string
 type CacheEntry = { key: CacheKey; items: EventRecord[] }
@@ -119,30 +122,25 @@ function makeKey(start: DateTime, end: DateTime, query: string, sc: Scope): Cach
   ].join('::')
 }
 
-function clearCache() {
-  memCache.clear()
-}
+function clearCache() { memCache.clear() }
 
-// Invalidate cache on any data change (local/shadow) or cross-tab storage change
 if (typeof window !== 'undefined') {
   window.addEventListener('fc:events-changed', clearCache)
   window.addEventListener('storage', clearCache)
 }
 
-/* -------------------- public reads -------------------- */
+/* -------------------- reads -------------------- */
 
 export function listExpanded(viewStart: DateTime, viewEnd: DateTime, query?: string): EventRecord[] {
-  // Derive scope from settings every call; the object is small and memoized via the cache key
   const sc = readScopeFromSettings()
   const key = makeKey(viewStart, viewEnd, query || '', sc)
-
   const hit = memCache.get(key)
   if (hit) return hit.items
 
-  // 1) local (base handles overrides & recurrence)
+  // 1) local (series handled inside base)
   const locals = base.listExpanded(viewStart, viewEnd, query)
 
-  // 2) external
+  // 2) external (make sure your integrations respect the given time bounds)
   const external = externalExpanded(viewStart, viewEnd, query) || []
 
   // 3) apply shadows to external occurrences
@@ -153,18 +151,17 @@ export function listExpanded(viewStart: DateTime, viewEnd: DateTime, query?: str
     return occ
   })
 
-  // 4) merge + scope filter
+  // 4) merge + (optional) scope filter
   const all = [...locals, ...mergedExternal]
   const filtered = all.filter(e => eventMatchesScope(e, sc))
 
   // 5) sort by start (then title)
   const sorted = filtered.sort((a, b) => a.start.localeCompare(b.start) || (a.title || '').localeCompare(b.title || ''))
-
   memCache.set(key, { key, items: sorted })
   return sorted
 }
 
-/* -------------------- writes (unchanged behavior from last good patch) -------------------- */
+/* -------------------- writes -------------------- */
 
 export function upsertEvent(evt: EventRecord): EventRecord {
   if (isExternal(evt) || isShadow(evt)) {
@@ -172,7 +169,6 @@ export function upsertEvent(evt: EventRecord): EventRecord {
     const cal = calId ? listCalendars().find(c => c.id === calId) : undefined
     if (!cal || !cal.allowEditLocal) { toast('This event is from an external calendar. Enable “Allow editing (local)” in Integrations to edit it.'); return evt }
 
-    // Preserve original occurrence start across re-edits
     const origOccStart = (evt as any)._origOccStart || (evt as any)._prevStart || evt.start
     const candidate = { ...(evt as any), start: origOccStart }
     const key = toExtKey(candidate) || (evt as any).extKey || null
@@ -191,12 +187,10 @@ export function upsertEvent(evt: EventRecord): EventRecord {
       _origOccStart: origOccStart,
     }
     if (idx >= 0) shadows[idx] = shadow; else shadows.push(shadow)
-    writeShadows(shadows)
-    clearCache()
+    writeShadows(shadows); clearCache()
     return evt
   }
 
-  // Local
   base.upsertEvent(evt, 'series')
   clearCache()
   return evt
@@ -204,11 +198,8 @@ export function upsertEvent(evt: EventRecord): EventRecord {
 
 export function deleteEvent(idOrEvt: string | EventRecord) {
   let evt: EventRecord | undefined
-  if (typeof idOrEvt === 'string') {
-    evt = readShadows().find(s => s.id === idOrEvt) as EventRecord | undefined
-  } else {
-    evt = idOrEvt
-  }
+  if (typeof idOrEvt === 'string') evt = readShadows().find(s => s.id === idOrEvt) as EventRecord | undefined
+  else evt = idOrEvt
 
   if (evt && (isExternal(evt) || isShadow(evt))) {
     const origOccStart = (evt as any)._origOccStart || (evt as any)._prevStart || evt.start
@@ -224,11 +215,9 @@ export function deleteEvent(idOrEvt: string | EventRecord) {
   if (evt) { base.deleteEvent(evt, 'series'); clearCache() }
 }
 
-/* -------------------- Home page range helper -------------------- */
-
-/** Suggested Home window: today → +6 weeks (tweak as needed) */
+/* -------------------- Home range helper -------------------- */
 export function suggestHomeRange(now: DateTime = DateTime.local()): { start: DateTime; end: DateTime } {
-  const start = now.startOf('day')
-  const end = start.plus({ weeks: 6 }).endOf('day')
+  const start = now.startOf('minute') // start "now", not midnight, to avoid old items
+  const end = start.plus({ weeks: 8 }).endOf('day') // 8 weeks window
   return { start, end }
 }
