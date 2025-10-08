@@ -72,7 +72,9 @@ export function upsertEvent(e: EventRecord, mode: EditMode): void {
   const baseEvt = idx >= 0 ? all[idx] : undefined
   if (!baseEvt) { all.push(normalizeEvent(e)); saveEvents(all); return }
 
-  const occKey = makeOverrideKey(DateTime.fromISO(e.start))
+  // IMPORTANT: use the original occurrence date for the override key / split boundary
+  const origStartISO = (e as any)._prevStart || e.start
+  const occKey = makeOverrideKey(DateTime.fromISO(origStartISO))
 
   if (mode === 'single') {
     baseEvt.overrides = baseEvt.overrides || {}
@@ -81,15 +83,12 @@ export function upsertEvent(e: EventRecord, mode: EditMode): void {
       start: e.start, end: e.end, allDay: e.allDay,
       tags: e.tags, checklist: e.checklist, attendees: e.attendees, colour: e.colour,
     }
-    baseEvt.exdates = baseEvt.exdates || []
-    if (!baseEvt.exdates.includes(occKey)) baseEvt.exdates.push(occKey)
-    all[idx] = normalizeEvent(baseEvt)
     saveEvents(all)
     return
   }
 
   if (mode === 'following') {
-    const splitStart = DateTime.fromISO(e.start)
+    const splitStart = DateTime.fromISO((e as any)._prevStart || e.start)
     const untilStr = formatUntil(splitStart.minus({ seconds: 1 }))
     const old = { ...baseEvt }
 
@@ -118,16 +117,41 @@ export function deleteEvent(e: EventRecord, mode: EditMode) {
   const idx = e.id ? all.findIndex(x => x.id === e.id) : -1
   if (idx < 0) return
 
-  if (!e.rrule || mode === 'series') {
-    all.splice(idx, 1)
+  if (!all[idx].rrule || mode === 'series') { all.splice(idx, 1); saveEvents(all); return }
+
+  const occKey = makeOverrideKey(DateTime.fromISO(e.start))
+
+  if (mode === 'single') {
+    all[idx].exdates = all[idx].exdates || []
+    if (!all[idx].exdates!.includes(occKey)) all[idx].exdates!.push(occKey)
     saveEvents(all)
     return
   }
 
-  const occKey = makeOverrideKey(DateTime.fromISO(e.start))
-  all[idx].exdates = all[idx].exdates || []
-  if (!all[idx].exdates!.includes(occKey)) all[idx].exdates!.push(occKey)
-  saveEvents(all)
+  if (mode === 'following') {
+    const splitStart = DateTime.fromISO(e.start)
+    const untilStr = formatUntil(splitStart.minus({ seconds: 1 }))
+    const old = { ...all[idx] }
+
+    old.rrule = upsertUntil(old.rrule || '', untilStr)
+    old.exdates = old.exdates || []
+    if (!old.exdates.includes(occKey)) old.exdates.push(occKey)
+
+    const newSeries: EventRecord = normalizeEvent({
+      ...all[idx],
+      id: `e_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+      start: e.start,
+      end: e.end,
+      overrides: {},
+      exdates: [],
+      rrule: rebuildRRuleFrom(all[idx].rrule || '', splitStart),
+    })
+
+    all[idx] = normalizeEvent(old)
+    all.push(newSeries)
+    saveEvents(all)
+    return
+  }
 }
 
 /* ----------------------------- helpers ---------------------------------- */
@@ -144,6 +168,7 @@ function normalizeEvent(e: EventRecord): EventRecord {
   }
 }
 
+// — SNIPPED: rebuildRRuleFrom, upsertUntil, formatUntil (unchanged) —
 function rebuildRRuleFrom(rr: string, dtStart: DateTime): string {
   const up = rr.toUpperCase()
   const freq = up.match(/FREQ=([A-Z]+)/)?.[1] || 'WEEKLY'
@@ -157,17 +182,14 @@ function rebuildRRuleFrom(rr: string, dtStart: DateTime): string {
   }
   return parts.join(';')
 }
-
-function upsertUntil(rr: string, until: string): string {
-  const up = (rr || '').toUpperCase()
-  if (!up) return `FREQ=WEEKLY;INTERVAL=1;UNTIL=${until}`
-  if (/UNTIL=/.test(up)) return up.replace(/UNTIL=[0-9T]+/, `UNTIL=${until}`)
-  return `${up};UNTIL=${until}`
+function upsertUntil(rr: string, untilStr: string): string {
+  const up = rr.toUpperCase()
+  const parts = up.split(';').filter(Boolean).filter(p => !p.startsWith('UNTIL='))
+  return [...parts, `UNTIL=${untilStr}`].join(';')
 }
-
 function formatUntil(dt: DateTime): string { return dt.toFormat("yyyyLLdd'T'HHmmss") }
 
-/* ----------------- legacy hook ---------------- */
+// React hook unchanged
 export function useEvents(args?: { start?: DateTime; end?: DateTime; query?: string }) {
   const [tick, setTick] = useState(0)
   useEffect(() => {
