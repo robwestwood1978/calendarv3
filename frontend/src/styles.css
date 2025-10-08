@@ -192,8 +192,11 @@ button.primary:hover { filter: brightness(0.96); }
 .day-stack {
   position: relative;
   height: calc(24 * var(--hour-h)); /* actual hour height is set inline */
-  /* Hour lines are applied inline to respect density; this fallback is fine */
-  background-image: linear-gradient(to bottom, transparent calc(var(--hour-h) - 1px), var(--border) var(--hour-h));
+  background-image: linear-gradient(
+    to bottom,
+    transparent calc(var(--hour-h) - 1px),
+    var(--border) var(--hour-h)
+  );
   background-size: 100% var(--hour-h);
 }
 
@@ -212,6 +215,18 @@ button.primary:hover { filter: brightness(0.96); }
   grid-template-rows: 6px auto 6px;
 }
 
+/* Guard: ensure no rogue pseudo-element overlays on events */
+.event::before,
+.event::after,
+.event *::before,
+.event *::after {
+  content: none !important;
+  display: none !important;
+  background: none !important;
+  box-shadow: none !important;
+}
+
+/* Inner content */
 .event .event-body { min-height: 22px; }
 .event .title {
   font-weight: 700;
@@ -301,8 +316,9 @@ button.primary:hover { filter: brightness(0.96); }
   background: var(--bg);
   width: 640px;
   max-width: 96%;
+  max-height: 92vh;          /* NEW: constrain modal height */
   border-radius: 16px;
-  overflow: hidden;
+  overflow: hidden;          /* header/footer stay visible; content scrolls */
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border);
@@ -322,11 +338,15 @@ button.primary:hover { filter: brightness(0.96); }
 }
 .modal-f { border-top: 1px solid var(--border); border-bottom: none; }
 
+/* NEW: make the body scroll, not the whole modal */
 .modal-b {
   padding: 1rem;
   display: flex;
   flex-direction: column;
   gap: .75rem;
+  flex: 1 1 auto;         /* take remaining height */
+  min-height: 0;          /* allow child overflow */
+  overflow-y: auto;       /* scroll content so footer stays visible */
 }
 
 .modal-b label {
@@ -414,34 +434,8 @@ button.primary:hover { filter: brightness(0.96); }
 /* ==================== Misc ==================== */
 .hint { font-size: .78rem; color: var(--muted); }
 button:disabled { opacity: .55; cursor: not-allowed; }
-/* --- Bottom nav --- */
-.bottom-nav {
-  position: fixed;
-  bottom: 12px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  display: flex;
-  gap: .25rem;
-  padding: .25rem;
-  box-shadow: var(--shadow);
-  z-index: 40;
-}
-.nav-btn {
-  padding: .45rem .8rem;
-  border-radius: 12px;
-  color: var(--text);
-  text-decoration: none;
-  border: 1px solid transparent;
-}
-.nav-btn.active {
-  background: var(--primary);
-  color: #fff;
-  border-color: var(--primary);
-}
-/* --- Bottom nav (ensure present) --- */
+
+/* Bottom nav (single, non-duplicated block) */
 .bottom-nav {
   position: fixed;
   bottom: 12px;
