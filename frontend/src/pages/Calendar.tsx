@@ -18,7 +18,7 @@ type View = 'day' | '3day' | 'week' | 'month'
 
 export default function CalendarPage() {
   const settings = useSettings()
-  const { timezone, allowEditing } = settings
+  const { timezone } = settings
 
   const [view, setView] = useState<View>('week')
   const [cursor, setCursor] = useState(DateTime.local().setZone(timezone).startOf('day'))
@@ -44,147 +44,77 @@ export default function CalendarPage() {
       const a = cursor.startOf('week'), b = cursor.endOf('week')
       return `${a.toFormat('d LLL')} – ${b.toFormat('d LLL yyyy')}`
     }
-    if (view === '3day') {
-      const b = cursor.plus({ days: 2 })
-      return `${cursor.toFormat('ccc d LLL')} – ${b.toFormat('ccc d LLL yyyy')}`
-    }
-    return cursor.toFormat('cccc d LLL yyyy')
-  }, [cursor.toISO(), view])
+    if (view === '3day') return `${cursor.toFormat('ccc d LLL')} – ${cursor.plus({ days: 2 }).toFormat('ccc d LLL yyyy')}`
+    return cursor.toFormat('ccc d LLL yyyy')
+  }, [cursor, view])
 
-  /* ----------------- Core actions ----------------- */
-
-  const openNewAt = (start: DateTime) => {
-    const end = start.plus({ minutes: settings.defaults.durationMin })
+  const onNewAt = (start: DateTime) => {
     setEditing({
-      id: undefined as any, // created on save
       title: '',
-      start: start.toISO(),
-      end: end.toISO(),
-      allDay: false,
-      attendees: [],
+      start: start.toISO()!,
+      end: start.plus({ minutes: settings.defaults.durationMin }).toISO()!,
       tags: [],
       checklist: [],
-      colour: settings.defaults.colour,
     } as EventRecord)
     setOpen(true)
   }
 
-  const openEdit = (evt: EventRecord) => {
-    setEditing(evt)
-    setOpen(true)
-  }
+  const onEdit = (evt: EventRecord) => { setEditing(evt); setOpen(true) }
 
-  /**
-   * Drag/resize commit coming from the grid.
-   * - Respect "Allow editing"
-   * - External: save via agenda/shadow layer (requires _prevStart)
-   * - Local recurring: include _prevStart so single-occurrence edits stick
-   */
+  // Grid drag/resize commits — always persist; write-guards live in state layer
   const onMoveOrResize = (evt: EventRecord) => {
     const external = isExternal(evt) || isShadow(evt)
-
-    if (!allowEditing) {
-      // When editing is disabled, don't mutate; open the modal to view.
-      setEditing(evt)
-      setOpen(true)
-      return
-    }
-
-    // Normalize: if the grid didn't add _prevStart (should be set), set it when start changed.
-    const withPrev = (() => {
-      if ((evt as any)._prevStart) return evt
-      if (editing && editing.id === evt.id && editing.start && editing.start !== evt.start) {
-        return { ...evt, _prevStart: editing.start } as any
-      }
-      return evt
-    })()
-
-    if (external) {
-      // Save shadow and tombstone original occurrence
-      upsertAgendaEvent(withPrev)
-      return
-    }
-
-    // Local event
-    // If it’s part of a series (has rrule), treat grid move as "single occurrence" edit by carrying _prevStart.
-    if (withPrev.rrule) {
-      upsertLocalEvent(withPrev as any, 'single')
-    } else {
-      upsertLocalEvent(withPrev as any, 'series')
-    }
+    const withPrev = { ...evt, _prevStart: (evt as any)._prevStart || evt.start } as any
+    if (external) { upsertAgendaEvent(withPrev); return }
+    if (withPrev.rrule) upsertLocalEvent(withPrev, 'single'); else upsertLocalEvent(withPrev, 'series')
   }
 
-  /**
-   * Save from modal (local + external).
-   * EventModal already adds `_prevStart` when the start changes.
-   */
+  // Modal save
   const onSaveFromModal = (evt: EventRecord, editScope: 'single' | 'following' | 'series') => {
     const external = isExternal(evt) || isShadow(evt)
-
-    if (!allowEditing) {
-      // No-op when editing disabled
-      setOpen(false)
-      setEditing(undefined)
-      return
-    }
-
-    if (external) {
-      upsertAgendaEvent(evt)
-      setOpen(false); setEditing(undefined)
-      return
-    }
-
+    if (external) { upsertAgendaEvent(evt); setOpen(false); setEditing(undefined); return }
     upsertLocalEvent(evt, evt.rrule ? editScope : 'series')
     setOpen(false); setEditing(undefined)
   }
 
   const onDeleteFromModal = (evt: EventRecord) => {
     const external = isExternal(evt) || isShadow(evt)
-    if (external) deleteAgendaEvent(evt.id as any)
-    else deleteLocalEvent(evt)
+    if (external) { deleteAgendaEvent(evt.id!); setOpen(false); setEditing(undefined); return }
+    deleteLocalEvent(evt, evt.rrule ? 'series' : 'series')
     setOpen(false); setEditing(undefined)
   }
 
-  /* ----------------- Render ----------------- */
-
   return (
     <div className="calendar-page">
+      {/* Toolbar */}
       <div className="toolbar">
         <div className="left">
-          <button onClick={prev} aria-label="Previous">⟨</button>
+          <button onClick={prev}>{'←'}</button>
           <button onClick={today}>Today</button>
-          <button onClick={next} aria-label="Next">⟩</button>
+          <button onClick={next}>{'→'}</button>
         </div>
         <div className="center">{title}</div>
         <div className="right">
           <select value={view} onChange={e => setView(e.target.value as View)}>
             <option value="day">Day</option>
-            <option value="3day">3 Days</option>
+            <option value="3day">3 days</option>
             <option value="week">Week</option>
             <option value="month">Month</option>
           </select>
-          <input
-            placeholder="Search title or tag…"
-            value={query}
-            onChange={e => setQuery(e.target.value)}
-          />
+          <input placeholder="Search…" value={query} onChange={e => setQuery(e.target.value)} />
         </div>
       </div>
 
+      {/* Grids */}
       {view === 'month' ? (
-        <MonthGrid
-          cursor={cursor}
-          query={query}
-          onNewAt={openNewAt}
-          onEdit={openEdit}
-        />
+        <MonthGrid cursor={cursor} query={query} onNewAt={onNewAt} onEdit={onEdit} />
       ) : (
         <TimeGrid
-          view={view as 'day' | '3day' | 'week'}
+          view={view === '3day' ? '3day' : (view as 'day'|'week')}
           cursor={cursor}
           query={query}
-          onNewAt={openNewAt}
-          onEdit={openEdit}
+          onNewAt={onNewAt}
+          onEdit={onEdit}
           onMoveOrResize={onMoveOrResize}
         />
       )}
