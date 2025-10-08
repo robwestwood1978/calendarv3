@@ -1,4 +1,3 @@
-// frontend/src/components/EventGrid.tsx
 import React, { useState } from 'react'
 import { DateTime } from 'luxon'
 import { listExpanded } from '../state/events-agenda'
@@ -16,7 +15,6 @@ interface GridProps {
 
 const SNAP_MINUTES = 15
 
-/* ------------- Toast helper ------------- */
 function toast(msg: string) {
   try { window.dispatchEvent(new CustomEvent('toast', { detail: msg })) } catch {}
 }
@@ -48,7 +46,7 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
         <div className="time-head" />
         {Array.from({ length: 24 }).map((_, h) => (
           <div key={h} className="time-tick" style={{ height: `${hourHeight}px` }}>
-            {DateTime.fromObject({ hour: h }).toFormat('HH:mm')}
+            {DateTime.fromObject({ hour: h }, { zone: settings.timezone }).toFormat('HH:mm')}
           </div>
         ))}
       </div>
@@ -111,8 +109,12 @@ function DayColumn({
       else if (drag.type === 'resize') { e = e0.plus({ minutes: drag.deltaMin }); if (e <= s) e = s.plus({ minutes: SNAP_MINUTES }) }
     }
 
-    const top = (s.diff(dayStart, 'minutes').minutes / 60) * hourHeight
-    const height = Math.max(24, (e.diff(s, 'minutes').minutes / 60) * hourHeight)
+    // Zone-normalised geometry so hour ticks and events always align
+    const sZ = s.setZone(day.zoneName as any)
+    const eZ = e.setZone(day.zoneName as any)
+    const top = (sZ.diff(dayStart, 'minutes').minutes / 60) * hourHeight
+    const height = Math.max(24, (eZ.diff(sZ, 'minutes').minutes / 60) * hourHeight)
+
     const colour = pickEventColour({
       baseColour: ev.colour,
       memberNames: ev.attendees,
@@ -131,14 +133,7 @@ function DayColumn({
         window.removeEventListener('mouseup', onUpDoc)
         setDrag(prev => {
           if (prev && prev.key === key && prev.type === 'move' && prev.deltaMin !== 0) {
-            // >>> Minimal change: carry ORIGINAL occurrence start for overrides/tombstones
-            onCommitChange({
-              ...ev,
-              _prevStart: ev.start,
-              start: s0.plus({ minutes: prev.deltaMin }).toISO()!,
-              end:   e0.plus({ minutes: prev.deltaMin }).toISO()!,
-            } as any)
-            // <<<
+            onCommitChange({ ...ev, _prevStart: ev.start as any, start: s0.plus({ minutes: prev.deltaMin }).toISO()!, end: e0.plus({ minutes: prev.deltaMin }).toISO()! } as any)
           }
           return null
         })
@@ -157,13 +152,7 @@ function DayColumn({
         setDrag(prev => {
           if (prev && prev.key === key && prev.type === 'resize' && prev.deltaMin !== 0) {
             const newEnd = e0.plus({ minutes: prev.deltaMin })
-            // >>> Minimal change: carry ORIGINAL occurrence start for overrides/tombstones
-            onCommitChange({
-              ...ev,
-              _prevStart: ev.start,
-              end: (newEnd > s0 ? newEnd : s0.plus({ minutes: SNAP_MINUTES })).toISO()!,
-            } as any)
-            // <<<
+            onCommitChange({ ...ev, _prevStart: ev.start as any, end: (newEnd > s0 ? newEnd : s0.plus({ minutes: SNAP_MINUTES })).toISO()! } as any)
           }
           return null
         })
@@ -186,12 +175,12 @@ function DayColumn({
         }}
         onClick={(e) => { e.stopPropagation(); onEdit(ev) }}
         role="button"
-        aria-label={`${ev.title} ${s.toFormat('HH:mm')}–${e.toFormat('HH:mm')}`}
+        aria-label={`${ev.title} ${sZ.toFormat('HH:mm')}–${eZ.toFormat('HH:mm')}`}
       >
         <div className="drag-handle" onMouseDown={startDrag} title="Drag to move" />
         <div className="event-body">
           <div className="title" title={ev.title}>{ev.title}</div>
-          <div className="time">{s.toFormat('HH:mm')}–{e.toFormat('HH:mm')}</div>
+          <div className="time">{sZ.toFormat('HH:mm')}–{eZ.toFormat('HH:mm')}</div>
         </div>
         <div className="resize-handle" onMouseDown={startResize} title="Drag to resize" />
       </div>
@@ -212,7 +201,7 @@ function DayColumn({
   )
 }
 
-/* ---------------- Month grid with all-day row ---------------- */
+/* ---------------- Month grid unchanged (kept for completeness) ---------------- */
 
 export function MonthGrid({
   cursor, query, onNewAt, onEdit,
@@ -302,8 +291,6 @@ export function MonthGrid({
   )
 }
 
-/* Lightweight toast listener. Place this component once in your app shell if you want global toasts.
-   If you don't have a shell, Month/Time grids fire a 'toast' event anyway – it's harmless if nothing listens. */
 export function ToastHost() {
   const [msg, setMsg] = React.useState<string | null>(null)
   React.useEffect(() => {
