@@ -36,8 +36,66 @@ import { AuthProvider } from './auth/AuthProvider'
 import { migrateSliceC } from './lib/migrateSliceC'
 import './styles.css'
 
+/* ===== Slice D: Sync bootstrap (additive, no UI changes) ===== */
+import { startSyncLoop, maybeRunSync } from './sync/bootstrap'
+import { readSyncConfig, writeSyncConfig } from './sync/core'
+
+function handleSyncURLToggle() {
+  try {
+    const url = new URL(window.location.href)
+    const sync = url.searchParams.get('sync')
+    if (!sync) return
+
+    const cfg = readSyncConfig()
+    if (sync === 'on') {
+      const next = {
+        ...cfg,
+        enabled: true,
+        providers: {
+          ...(cfg.providers || {}),
+          google: {
+            enabled: true,
+            accountKey: cfg.providers?.google?.accountKey,
+            calendars: cfg.providers?.google?.calendars || [],
+          },
+          // Apple adapter will be introduced in Slice D3; keep disabled for now.
+          apple: {
+            enabled: false,
+            accountKey: cfg.providers?.apple?.accountKey,
+            calendars: cfg.providers?.apple?.calendars || [],
+          },
+        },
+        windowWeeks: cfg.windowWeeks || 8,
+      }
+      writeSyncConfig(next)
+      url.searchParams.delete('sync')
+      window.history.replaceState({}, '', url.toString())
+      try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Cloud sync enabled (Google stub).' })) } catch {}
+    } else if (sync === 'off') {
+      const next = { ...cfg, enabled: false }
+      writeSyncConfig(next)
+      url.searchParams.delete('sync')
+      window.history.replaceState({}, '', url.toString())
+      try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Cloud sync disabled.' })) } catch {}
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function bootstrapSync() {
+  handleSyncURLToggle()
+  // Safe to call → both are no-ops unless sync is enabled
+  maybeRunSync()
+  startSyncLoop() // 5 min interval by default; also ticks on visibility change
+}
+/* ===== End Slice D: Sync bootstrap ===== */
+
 // Run safe, idempotent migration (won't overwrite bootstrap defaults)
 migrateSliceC()
+
+// Start sync bootstrap *after* migrations (does nothing unless you used ?sync=on)
+bootstrapSync()
 
 function RootApp() {
   // “Pulse” causes the routed subtree to remount whenever auth/agenda/flags change.
