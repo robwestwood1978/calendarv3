@@ -1,8 +1,9 @@
 // frontend/src/pages/Settings.tsx
-// Keeps your original Settings page (SettingsPage) and appends:
-// - Experiments card (toggle Slice C auth; default OFF, reloads page when changed)
-// - Account panel (only shown when flag is ON)
-// - Integrations panel (Slice D) for Apple/ICS calendars with member-mapping
+// Baseline D Settings: restored + Google Calendar connection added cleanly.
+// - Keeps your original SettingsPage content and visual style.
+// - Preserves Experiments + AccountPanel exactly as before.
+// - Renders IntegrationsPanel (unchanged) and adds a matching Google section beneath it.
+// - Google section is feature-flagged: featureFlags.google === true.
 
 import React, { useEffect, useState } from 'react'
 import SettingsPage from '../components/SettingsPage'
@@ -10,13 +11,15 @@ import { featureFlags } from '../state/featureFlags'
 import { useAuth } from '../auth/AuthProvider'
 import { useSettings } from '../state/settings'
 
-// ⬇️ NEW: Slice D integrations panel
+// Existing Slice D panel (unchanged)
 import IntegrationsPanel from '../components/integrations/IntegrationsPanel'
+
+// NEW: Google connect card
+import GoogleConnectCard from '../components/integrations/GoogleConnectCard'
 
 type Flags = ReturnType<typeof featureFlags.get>
 
 export default function Settings() {
-  // Track feature flags (and live-update if changed in another tab)
   const [flags, setFlags] = useState<Flags>(() => featureFlags.get())
   useEffect(() => {
     const unsub = featureFlags.subscribe(() => setFlags(featureFlags.get()))
@@ -26,16 +29,15 @@ export default function Settings() {
   function onToggleAuth(e: React.ChangeEvent<HTMLInputElement>) {
     const on = e.currentTarget.checked
     featureFlags.set({ authEnabled: on })
-    // Hard reload to avoid transient states and ensure seed users are available immediately
     setTimeout(() => window.location.reload(), 0)
   }
 
   return (
     <div style={{ display: 'grid', gap: 16 }}>
-      {/* Your baseline A/B Settings UI */}
+      {/* Baseline A/B Settings UI (unchanged, full household/appearance/tags UX) */}
       <SettingsPage />
 
-      {/* Experiments: visible so you can enable Slice C; default OFF */}
+      {/* Experiments (unchanged) */}
       <section style={card}>
         <h3 style={h3}>Experiments</h3>
         <label style={row}>
@@ -49,18 +51,32 @@ export default function Settings() {
         <p style={hint}>When disabled, the app behaves exactly like Slice A/B.</p>
       </section>
 
-      {/* Account: only shown when flag is ON */}
+      {/* Account (unchanged) */}
       {flags.authEnabled && <AccountPanel />}
 
-      {/* ⬇️ NEW: Slice D — Integrations panel (master toggle inside the panel) */}
+      {/* Integrations (existing panel, unchanged) */}
       <IntegrationsPanel />
+
+      {/* NEW: Google Calendar section — visually identical card, minimal & additive */}
+      {flags.google && (
+        <section style={card}>
+          <h3 style={h3}>Google Calendar</h3>
+          <p style={hint}>
+            Connect your Google account to pull events into the Family Calendar.
+            You can disconnect at any time.
+          </p>
+          <div style={{ marginTop: 8 }}>
+            <GoogleConnectCard />
+          </div>
+        </section>
+      )}
     </div>
   )
 }
 
 function AccountPanel() {
   const { currentUser, linkMember, unlinkMember } = useAuth()
-  const s = useSettings() // baseline hook; plain data
+  const s = useSettings()
   const members = Array.isArray((s as any).members) ? (s as any).members : []
 
   return (
@@ -108,7 +124,7 @@ function AccountPanel() {
   )
 }
 
-/* ---------------- styles (minimal, neutral) ---------------- */
+/* ---------------- styles (match your baseline) ---------------- */
 
 const card: React.CSSProperties = {
   background: '#fff',
