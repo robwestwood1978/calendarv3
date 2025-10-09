@@ -1,12 +1,11 @@
 // frontend/src/components/integrations/GoogleConnectCard.tsx
 import React, { useEffect, useState } from 'react'
-import { featureFlags } from '../../state/featureFlags'
 import { beginAuth, disconnect, isSignedIn, getAccountKey, maybeHandleRedirect } from '../../google/oauth'
 import { readSyncConfig, writeSyncConfig } from '../../sync/core'
 
-const card: React.CSSProperties = { padding: 12, background: 'var(--card-bg, #fff)', borderRadius: 12, boxShadow: '0 1px 2px rgba(0,0,0,0.06)' }
 const row: React.CSSProperties  = { display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between' }
-const small: React.CSSProperties = { fontSize: 12, opacity: 0.75 }
+const small: React.CSSProperties = { fontSize: 12, color: '#64748b' }
+const box: React.CSSProperties   = { border: '1px solid #e5e7eb', borderRadius: 8, padding: 12, background: '#f8fafc' }
 
 function toast(msg: string) { try { window.dispatchEvent(new CustomEvent('toast', { detail: msg })) } catch {} }
 
@@ -59,7 +58,7 @@ export default function GoogleConnectCard() {
   }
 
   return (
-    <div style={card}>
+    <div style={box}>
       <div style={row}>
         <div>
           <div style={{ fontWeight: 600 }}>Google Calendar</div>
@@ -76,11 +75,9 @@ export default function GoogleConnectCard() {
           </div>
         )}
       </div>
-      {!featureFlags.get().google && (
-        <div style={{ marginTop: 8, ...small }}>
-          Tip: set <code>featureFlags.set({'{'} google: true {'}'})</code> in the console to reveal this card.
-        </div>
-      )}
+      <div style={{ marginTop: 6, ...small }}>
+        Uses your Google account to read events within your sync window. You can revoke access any time.
+      </div>
     </div>
   )
 }
