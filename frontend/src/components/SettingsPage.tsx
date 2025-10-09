@@ -1,6 +1,9 @@
 // frontend/src/components/SettingsPage.tsx
 import React, { useState } from 'react'
 import { useSettings, Member, MemberRole } from '../state/settings'
+import { featureFlags } from '../state/featureFlags'
+import GoogleConnectCard from './integrations/GoogleConnectCard'
+import IntegrationsPanel from './integrations/IntegrationsPanel'
 
 const ROLES: MemberRole[] = ['parent', 'adult', 'child']
 const THEMES = ['light', 'dark'] as const
@@ -33,8 +36,11 @@ export default function SettingsPage() {
     cancelEditMember()
   }
 
+  const removeTag = (t: string) => s.setTags((s.tags || []).filter(x => x !== t))
+  const removeBring = (t: string) => s.setChecklist((s.checklist || []).filter(x => x !== t))
+
   return (
-    <div className="admin" style={{ paddingBottom: 80 }}>
+    <div className="settings-page">
       <h2>Settings</h2>
 
       {/* Appearance */}
@@ -49,223 +55,104 @@ export default function SettingsPage() {
           </label>
 
           <div>
-            <strong>Hour density</strong>
-            <div className="row" style={{ marginTop: '.35rem' }}>
-              <input id="denseHours" type="checkbox" checked={s.denseHours} onChange={e => s.setDense(e.target.checked)} />
-              <label htmlFor="denseHours" style={{ userSelect: 'none', cursor: 'pointer' }}>Dense hours</label>
-            </div>
-          </div>
-
-          <label>
-            Font size
-            <input type="range" min={0.9} max={1.2} step={0.05} value={s.fontScale}
-                   onChange={e => s.setFontScale(parseFloat(e.target.value))} />
-          </label>
-        </div>
-
-        <div className="grid3" style={{ marginTop: '.6rem' }}>
-          <label>
-            Timezone
+            <label>Timezone</label>
             <select value={s.timezone} onChange={e => s.setTimezone(e.target.value)}>
               {TZ_LIST.map(tz => <option key={tz} value={tz}>{tz}</option>)}
             </select>
-          </label>
+          </div>
 
-          <label>
-            Default duration (minutes)
-            <input type="number" min={15} step={15} value={s.defaults.durationMin}
-                   onChange={e => s.setDefaults({ durationMin: Math.max(15, parseInt(e.target.value || '60', 10)) })} />
-          </label>
-
-          <label>
-            Default event colour
-            <div className="row">
-              <input type="color" value={s.defaults.colour}
-                     onChange={e => s.setDefaults({ colour: e.target.value })} />
-              <code className="hex">{s.defaults.colour}</code>
-            </div>
-          </label>
-        </div>
-
-        <div className="row" style={{ marginTop: '.6rem', gap: '.5rem', flexWrap: 'wrap' }}>
-          <span className="hint">Default reminders (minutes)</span>
-          {[0, 5, 10, 15, 30, 60, 120, 1440].map(m => {
-            const on = s.defaults.remindersMin.includes(m)
-            return (
-              <button key={m} className={`chip ${on ? 'active' : ''}`}
-                      onClick={() => {
-                        const has = s.defaults.remindersMin.includes(m)
-                        s.setDefaults({ remindersMin: has
-                          ? s.defaults.remindersMin.filter(x => x !== m)
-                          : [...s.defaults.remindersMin, m].sort((a,b)=>a-b) })
-                      }}>
-                {m === 0 ? 'At start' : `${m} min`}
-              </button>
-            )
-          })}
-        </div>
-      </div>
-
-      {/* Members */}
-      <div className="card">
-        <h3>Household members</h3>
-        <div className="grid3" style={{ alignItems: 'end' }}>
-          <label>
-            Name
-            <input placeholder="e.g. Alex" value={memberDraft.name || ''} onChange={e => setMemberDraft(d => ({ ...d, name: e.target.value }))} />
-          </label>
-          <label>
-            Role
-            <select value={memberDraft.role || 'child'} onChange={e => setMemberDraft(d => ({ ...d, role: e.target.value as MemberRole }))}>
-              {ROLES.map(r => <option key={r} value={r}>{cap(r)}</option>)}
+          <div>
+            <label>Week starts on</label>
+            <select value={s.weekStartMonday ? 'Mon' : 'Sun'} onChange={e => s.setWeekStart(e.target.value === 'Mon')}>
+              <option>Mon</option>
+              <option>Sun</option>
             </select>
-          </label>
-          <label>
-            Colour
-            <div className="row">
-              <input type="color" value={memberDraft.colour || '#1e88e5'} onChange={e => setMemberDraft(d => ({ ...d, colour: e.target.value }))} />
-              <code className="hex">{memberDraft.colour || ''}</code>
-            </div>
-          </label>
-        </div>
-        <div className="grid2" style={{ marginTop: '.5rem', alignItems: 'end' }}>
-          <label>
-            Email (optional)
-            <input type="email" placeholder="name@example.com" value={memberDraft.email || ''} onChange={e => setMemberDraft(d => ({ ...d, email: e.target.value }))} />
-          </label>
-          <div className="row" style={{ gap: '.5rem' }}>
-            {editingMemberId && <button onClick={cancelEditMember}>Cancel</button>}
-            <button className="primary" onClick={saveMember}>{editingMemberId ? 'Save changes' : 'Add member'}</button>
           </div>
         </div>
-
-        <div className="chips" style={{ marginTop: '.75rem' }}>
-          {s.members.map(m => (
-            <span className="chip" key={m.id} title={m.email || ''}>
-              <span className="rule preview" style={{ background: m.colour || '#ccc', width: 14, height: 14 }}></span>
-              {m.name} • {cap(m.role)}
-              <button className="chip-x" onClick={() => startEditMember(m)} aria-label={`Edit ${m.name}`}>✎</button>
-              <button className="chip-x" onClick={() => s.removeMember(m.id)} aria-label={`Remove ${m.name}`}>×</button>
-            </span>
-          ))}
-        </div>
       </div>
 
-      {/* Presets */}
+      {/* Household members */}
       <div className="card">
-        <h3>Presets</h3>
+        <h3>Household</h3>
         <div className="grid2">
           <div>
-            <strong>Tags</strong>
-            <div className="row" style={{ marginTop: '.35rem' }}>
-              <input placeholder="Add a tag" value={tagInput} onChange={e => setTagInput(e.target.value)}
-                     onKeyDown={e => { if (e.key === 'Enter') { s.addTag(tagInput); setTagInput('') } }} />
-              <button onClick={() => { s.addTag(tagInput); setTagInput('') }}>Add</button>
-            </div>
-            <div className="chips" style={{ marginTop: '.5rem' }}>
-              {s.tags.map(t => (
-                <span key={t} className="chip">{t}<button className="chip-x" onClick={() => s.removeTag(t)} aria-label={`Remove ${t}`}>×</button></span>
+            <ul className="list">
+              {s.members.map(m => (
+                <li key={m.id} className="row">
+                  <div className="row-left">
+                    <span className="dot" style={{ background: m.colour || '#888' }} />
+                    <strong>{m.name}</strong> <small>· {m.role}</small>
+                    {m.email ? <small> · {m.email}</small> : null}
+                  </div>
+                  <div className="row-right">
+                    <button onClick={() => startEditMember(m)} className="btn btn-small">Edit</button>
+                    <button onClick={() => s.removeMember(m.id)} className="btn btn-small btn-danger">Remove</button>
+                  </div>
+                </li>
               ))}
-            </div>
+            </ul>
           </div>
 
           <div>
-            <strong>What to bring</strong>
-            <div className="row" style={{ marginTop: '.35rem' }}>
-              <input placeholder="Add an item" value={bringInput} onChange={e => setBringInput(e.target.value)}
-                     onKeyDown={e => { if (e.key === 'Enter') { s.addBring(bringInput); setBringInput('') } }} />
-              <button onClick={() => { s.addBring(bringInput); setBringInput('') }}>Add</button>
+            <h4>{editingMemberId ? 'Edit member' : 'Add member'}</h4>
+            <div className="form-grid">
+              <label>Name<input value={memberDraft.name || ''} onChange={e => setMemberDraft({ ...memberDraft, name: e.target.value })} /></label>
+              <label>Role
+                <select value={memberDraft.role || 'child'} onChange={e => setMemberDraft({ ...memberDraft, role: e.target.value as MemberRole })}>
+                  {ROLES.map(r => <option key={r} value={r}>{r}</option>)}
+                </select>
+              </label>
+              <label>Colour<input value={memberDraft.colour || ''} onChange={e => setMemberDraft({ ...memberDraft, colour: e.target.value })} placeholder="#2F80ED" /></label>
+              <label>Email (optional)<input value={memberDraft.email || ''} onChange={e => setMemberDraft({ ...memberDraft, email: e.target.value })} /></label>
             </div>
-            <div className="chips" style={{ marginTop: '.5rem' }}>
-              {s.bringPresets.map(t => (
-                <span key={t} className="chip">{t}<button className="chip-x" onClick={() => s.removeBring(t)} aria-label={`Remove ${t}`}>×</button></span>
-              ))}
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={saveMember} className="btn">{editingMemberId ? 'Save' : 'Add'}</button>
+              {editingMemberId && <button onClick={cancelEditMember} className="btn btn-secondary">Cancel</button>}
             </div>
           </div>
         </div>
       </div>
 
-      {/* Colour rules */}
+      {/* Tags + Checklist */}
       <div className="card">
-        <h3>Colour rules</h3>
-        <p className="hint" style={{ marginTop: '-.25rem' }}>
-          Colour is chosen by the first match: <strong>Member</strong> → <strong>Tag</strong> → <strong>Role</strong> → event’s own colour.
-          Use Member to keep a child’s colour across their activities; Tag to override (e.g. “Medical”).
-        </p>
-
-        <RuleBuilder />
-        <div style={{ marginTop: '.75rem' }}>
-          {s.colourRules.length === 0 && <p className="hint">No rules yet. Add some above.</p>}
-          {s.colourRules.map(r => (
-            <div key={r.id} className="rule">
-              <span className="pill">{cap(r.type)}</span>
-              <span>{r.value}</span>
-              <span className="preview" style={{ background: r.colour }}></span>
-              <code className="hex">{r.colour}</code>
-              <button className="chip-x" onClick={() => s.removeRule(r.id)} aria-label="Remove rule">×</button>
+        <h3>Tags &amp; Checklist</h3>
+        <div className="grid2">
+          <div>
+            <h4>Common tags</h4>
+            <div className="row-wrap">
+              {(s.tags || []).map(t => <span className="pill" key={t} onClick={() => removeTag(t)}>{t} ×</span>)}
             </div>
-          ))}
+            <div className="row">
+              <input placeholder="Add tag" value={tagInput} onChange={e => setTagInput(e.target.value)} />
+              <button onClick={() => { const t = tagInput.trim(); if (t) s.setTags([...(s.tags || []), t]); setTagInput('') }} className="btn">Add</button>
+            </div>
+          </div>
+          <div>
+            <h4>What to bring</h4>
+            <div className="row-wrap">
+              {(s.checklist || []).map(t => <span className="pill" key={t} onClick={() => removeBring(t)}>{t} ×</span>)}
+            </div>
+            <div className="row">
+              <input placeholder="Add item" value={bringInput} onChange={e => setBringInput(e.target.value)} />
+              <button onClick={() => { const t = bringInput.trim(); if (t) s.setChecklist([...(s.checklist || []), t]); setBringInput('') }} className="btn">Add</button>
+            </div>
+          </div>
         </div>
       </div>
+
+      {/* Integrations */}
+      {featureFlags.get().google || featureFlags.get().integrations ? (
+        <div className="card">
+          <h3>Integrations</h3>
+          {featureFlags.get().google && <GoogleConnectCard />}
+          {/* Keep existing ICS shadows intact */}
+          {featureFlags.get().integrations && (
+            <div style={{ marginTop: 12 }}>
+              <IntegrationsPanel />
+            </div>
+          )}
+        </div>
+      ) : null}
     </div>
   )
-
-  function RuleBuilder() {
-    const [type, setType] = useState<'member' | 'tag' | 'role'>('member')
-    const [value, setValue] = useState('')
-    const [colour, setColour] = useState('#1e88e5')
-
-    return (
-      <>
-        <div className="grid3" style={{ marginTop: '.5rem', alignItems: 'end' }}>
-          <label>
-            Rule type
-            <select value={type} onChange={e => { setType(e.target.value as any); setValue('') }}>
-              <option value="member">Member</option>
-              <option value="tag">Tag</option>
-              <option value="role">Role</option>
-            </select>
-          </label>
-          <label>
-            {type === 'member' ? 'Member' : type === 'tag' ? 'Tag' : 'Role'}
-            {type === 'member' && (
-              <select value={value} onChange={e => setValue(e.target.value)}>
-                <option value="">Select member…</option>
-                {s.members.map(m => <option key={m.id} value={m.name}>{m.name}</option>)}
-              </select>
-            )}
-            {type === 'tag' && (
-              <select value={value} onChange={e => setValue(e.target.value)}>
-                <option value="">Select tag…</option>
-                {s.tags.map(t => <option key={t} value={t}>{t}</option>)}
-              </select>
-            )}
-            {type === 'role' && (
-              <select value={value} onChange={e => setValue(e.target.value)}>
-                <option value="">Select role…</option>
-                {ROLES.map(r => <option key={r} value={r}>{cap(r)}</option>)}
-              </select>
-            )}
-          </label>
-          <label>
-            Colour
-            <div className="row">
-              <input type="color" value={colour} onChange={e => setColour(e.target.value)} />
-              <code className="hex">{colour}</code>
-            </div>
-          </label>
-        </div>
-        <div className="row" style={{ marginTop: '.5rem' }}>
-          <button className="primary" onClick={() => {
-            const v = value.trim()
-            if (!v) { alert('Please choose a value for the rule'); return }
-            s.addRule({ type, value: v, colour })
-            setValue('')
-          }}>Add rule</button>
-        </div>
-      </>
-    )
-  }
 }
-
-function cap(s: string) { return s.charAt(0).toUpperCase() + s.slice(1) }
