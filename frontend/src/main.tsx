@@ -12,6 +12,7 @@ if (typeof window !== 'undefined') {
       localStorage.removeItem('fc_current_user_v1')
       localStorage.removeItem('fc_my_agenda_v1')
       localStorage.removeItem('fc_feature_flags_v1')
+      localStorage.removeItem('fc_google_oauth_v1')
       alert('Local data cleared. Reloading…')
     } catch {}
     url.searchParams.delete('reset')
@@ -36,12 +37,15 @@ import { AuthProvider } from './auth/AuthProvider'
 import { migrateSliceC } from './lib/migrateSliceC'
 import './styles.css'
 
-/* === NEW: global toaster so ?sync=on/off shows a message === */
+/* === Global toaster so ?sync=on/off shows a message === */
 import Toaster from './components/Toaster'
 
 /* ===== Slice D: Sync bootstrap (additive, no UI changes) ===== */
 import { startSyncLoop, maybeRunSync } from './sync/bootstrap'
 import { readSyncConfig, writeSyncConfig } from './sync/core'
+
+/* ===== NEW: Handle Google OAuth redirect on boot (pre-render) ===== */
+import { maybeHandleRedirect } from './google/oauth'
 
 function handleSyncURLToggle() {
   try {
@@ -73,8 +77,8 @@ function handleSyncURLToggle() {
       url.searchParams.delete('sync')
       window.history.replaceState({}, '', url.toString())
       // fire once now (may be before React mounts) and once after mount
-      try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Cloud sync enabled (Google stub).' })) } catch {}
-      setTimeout(() => { try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Cloud sync enabled (Google stub).' })) } catch {} }, 500)
+      try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Cloud sync enabled (Google).' })) } catch {}
+      setTimeout(() => { try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Cloud sync enabled (Google).' })) } catch {} }, 500)
     } else if (sync === 'off') {
       const next = { ...cfg, enabled: false }
       writeSyncConfig(next)
@@ -94,49 +98,60 @@ function bootstrapSync() {
   maybeRunSync()
   startSyncLoop() // 5 min interval by default; also ticks on visibility change
 }
-/* ===== End Slice D: Sync bootstrap ===== */
 
-// Run safe, idempotent migration (won't overwrite bootstrap defaults)
-migrateSliceC()
+// Delay render until we've handled any Google OAuth redirect.
+// This prevents the blank /oauth2/callback screen and finalises tokens before app UI mounts.
+async function startApp() {
+  try {
+    await maybeHandleRedirect()
+  } catch (e) {
+    console.warn('OAuth redirect handling failed:', e)
+  }
 
-// Start sync bootstrap *after* migrations (does nothing unless you used ?sync=on)
-bootstrapSync()
+  // Run safe, idempotent migration (won't overwrite bootstrap defaults)
+  migrateSliceC()
 
-function RootApp() {
-  // “Pulse” causes the routed subtree to remount whenever auth/agenda/flags change.
-  const [pulse, setPulse] = React.useState(0)
+  // Start sync bootstrap *after* migrations (does nothing unless you used ?sync=on or enabled via Settings)
+  bootstrapSync()
 
-  return (
-    <React.StrictMode>
-      <SettingsProvider>
-        <AuthProvider>
-          <BrowserRouter>
-            {/* Global toaster lives once for whole app */}
-            <Toaster />
+  function RootApp() {
+    // “Pulse” causes the routed subtree to remount whenever auth/agenda/flags change.
+    const [pulse, setPulse] = React.useState(0)
 
-            {/* Invisible: listens for account/link/toggle/flag changes */}
-            <AgendaRefreshBridge onPulse={() => setPulse(p => (p + 1) % 1_000_000)} />
+    return (
+      <React.StrictMode>
+        <SettingsProvider>
+          <AuthProvider>
+            <BrowserRouter>
+              {/* Global toaster lives once for whole app */}
+              <Toaster />
 
-            {/* Fixed overlay that shows Sign in + My Agenda (only when accounts are enabled) */}
-            <SignInDock />
+              {/* Invisible: listens for account/link/toggle/flag changes */}
+              <AgendaRefreshBridge onPulse={() => setPulse(p => (p + 1) % 1_000_000)} />
 
-            <Routes key={pulse}>
-              {/* Remount AppLayout + children when pulse changes (keeps your original App.tsx/nav intact) */}
-              <Route element={<AppLayout />}>
-                <Route index element={<Home />} />
-                <Route path="calendar" element={<Calendar />} />
-                <Route path="lists" element={<Lists />} />
-                <Route path="chores" element={<Chores />} />
-                <Route path="meals" element={<Meals />} />
-                <Route path="settings" element={<Settings />} />
-              </Route>
-            </Routes>
-          </BrowserRouter>
-        </AuthProvider>
-      </SettingsProvider>
-    </React.StrictMode>
-  )
+              {/* Fixed overlay that shows Sign in + My Agenda (only when accounts are enabled) */}
+              <SignInDock />
+
+              <Routes key={pulse}>
+                {/* Remount AppLayout + children when pulse changes (keeps your original App.tsx/nav intact) */}
+                <Route element={<AppLayout />}>
+                  <Route index element={<Home />} />
+                  <Route path="calendar" element={<Calendar />} />
+                  <Route path="lists" element={<Lists />} />
+                  <Route path="chores" element={<Chores />} />
+                  <Route path="meals" element={<Meals />} />
+                  <Route path="settings" element={<Settings />} />
+                </Route>
+              </Routes>
+            </BrowserRouter>
+          </AuthProvider>
+        </SettingsProvider>
+      </React.StrictMode>
+    )
+  }
+
+  const root = document.getElementById('root')!
+  createRoot(root).render(<RootApp />)
 }
 
-const root = document.getElementById('root')!
-createRoot(root).render(<RootApp />)
+startApp()
