@@ -1,9 +1,10 @@
 // frontend/src/components/SettingsPage.tsx
-// Restored & polished baseline Settings UI (no Google code here).
+// Restored Baseline-D Settings UI (no Google code here).
 // - Appearance: theme, timezone, week start
-// - Household members: list, add, edit, remove, colour, email
-// - Tags & What to Bring: add/remove with pills, Enter-to-add
-// Uses existing classes: card, grid2, grid3, list, row, row-left, row-right, form-grid, pill, btn, btn-secondary, btn-small, dot
+// - Household: list, add, edit, remove, colour, email
+// - Tags & What to Bring: add/remove via pills, Enter-to-add
+// Uses your app classes: card, grid2, grid3, list, row, row-left, row-right,
+// form-grid, pill, btn, btn-secondary, btn-small, dot
 
 import React, { useMemo, useState } from 'react'
 import { useSettings, Member, MemberRole } from '../state/settings'
@@ -73,7 +74,7 @@ export default function SettingsPage() {
 
   return (
     <div className="settings-page">
-      {/* ========== Appearance ========== */}
+      {/* Appearance */}
       <div className="card">
         <h3>Appearance</h3>
         <div className="grid3">
@@ -103,7 +104,7 @@ export default function SettingsPage() {
         </div>
       </div>
 
-      {/* ========== Household Members ========== */}
+      {/* Household */}
       <div className="card">
         <h3>Household</h3>
         <div className="grid2">
@@ -170,7 +171,7 @@ export default function SettingsPage() {
         </div>
       </div>
 
-      {/* ========== Tags & What to Bring ========== */}
+      {/* Tags & What to Bring */}
       <div className="card">
         <h3>Tags &amp; What to Bring</h3>
         <div className="grid2">
