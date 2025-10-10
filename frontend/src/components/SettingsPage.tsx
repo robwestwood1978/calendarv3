@@ -18,7 +18,7 @@ export default function SettingsPage() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState<Partial<Member>>({})
 
-  // Inputs for tags & checklist
+  // Inputs for tags & bring presets
   const [tagInput, setTagInput] = useState('')
   const [bringInput, setBringInput] = useState('')
 
@@ -53,23 +53,24 @@ export default function SettingsPage() {
     cancelEdit()
   }
 
+  // ---- NEW: use current state API (add/remove Tag/Bring) ----
   function addTag() {
     const v = tagInput.trim()
     if (!v) return
-    s.setTags([...(s.tags || []), v])
+    s.addTag(v)
     setTagInput('')
   }
   function addBring() {
     const v = bringInput.trim()
     if (!v) return
-    s.setChecklist([...(s.checklist || []), v])
+    s.addBring(v)
     setBringInput('')
   }
   function removeTag(v: string) {
-    s.setTags((s.tags || []).filter(x => x !== v))
+    s.removeTag(v)
   }
   function removeBring(v: string) {
-    s.setChecklist((s.checklist || []).filter(x => x !== v))
+    s.removeBring(v)
   }
 
   return (
@@ -175,6 +176,7 @@ export default function SettingsPage() {
       <div className="card">
         <h3>Tags &amp; What to Bring</h3>
         <div className="grid2">
+          {/* Tags */}
           <div>
             <h4>Common Tags</h4>
             <div className="row-wrap">
@@ -193,10 +195,11 @@ export default function SettingsPage() {
             </div>
           </div>
 
+          {/* Bring presets */}
           <div>
             <h4>What to Bring</h4>
             <div className="row-wrap">
-              {(s.checklist || []).map(t => (
+              {(s.bringPresets || []).map(t => (
                 <span key={t} className="pill" onClick={() => removeBring(t)}>{t} ×</span>
               ))}
             </div>
