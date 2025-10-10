@@ -24,7 +24,6 @@ export default function SettingsPage() {
 
   const tzOptions = useMemo(() => {
     try {
-      // Modern browsers
       // @ts-ignore
       const list = typeof Intl !== 'undefined' && Intl.supportedValuesOf ? Intl.supportedValuesOf('timeZone') : []
       return (list && list.length ? list : [s.timezone]).filter(Boolean) as string[]
@@ -53,7 +52,7 @@ export default function SettingsPage() {
     cancelEdit()
   }
 
-  // ---- NEW: use current state API (add/remove Tag/Bring) ----
+  // Use current state API
   function addTag() {
     const v = tagInput.trim()
     if (!v) return
