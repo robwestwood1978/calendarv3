@@ -1,77 +1,109 @@
 // frontend/src/components/SettingsPage.tsx
-import React, { useState } from 'react'
-import { useSettings, Member, MemberRole } from '../state/settings'
-import { featureFlags } from '../state/featureFlags'
-import GoogleConnectCard from './integrations/GoogleConnectCard'
-import IntegrationsPanel from './integrations/IntegrationsPanel'
+// Restored & polished baseline Settings UI (no Google code here).
+// - Appearance: theme, timezone, week start
+// - Household members: list, add, edit, remove, colour, email
+// - Tags & What to Bring: add/remove with pills, Enter-to-add
+// Uses existing classes: card, grid2, grid3, list, row, row-left, row-right, form-grid, pill, btn, btn-secondary, btn-small, dot
 
-const ROLES: MemberRole[] = ['parent', 'adult', 'child']
-const THEMES = ['light', 'dark'] as const
-const TZ_LIST = [
-  'Europe/London', 'Europe/Dublin', 'Europe/Paris', 'Europe/Berlin',
-  'Europe/Madrid', 'Europe/Rome', 'America/New_York', 'America/Los_Angeles',
-  'Asia/Dubai', 'Asia/Singapore', 'Asia/Tokyo', 'Australia/Sydney',
-]
+import React, { useMemo, useState } from 'react'
+import { useSettings, Member, MemberRole } from '../state/settings'
+
+const ROLES: MemberRole[] = ['parent', 'adult', 'child'] as const
 
 export default function SettingsPage() {
   const s = useSettings()
 
+  // Household edit state
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [draft, setDraft] = useState<Partial<Member>>({})
+
+  // Inputs for tags & checklist
   const [tagInput, setTagInput] = useState('')
   const [bringInput, setBringInput] = useState('')
-  const [memberDraft, setMemberDraft] = useState<Partial<Member>>({ role: 'child' })
-  const [editingMemberId, setEditingMemberId] = useState<string | null>(null)
 
-  const startEditMember = (m: Member) => {
-    setEditingMemberId(m.id)
-    setMemberDraft({ name: m.name, role: m.role, colour: m.colour, email: m.email })
+  const tzOptions = useMemo(() => {
+    try {
+      // Modern browsers
+      // @ts-ignore
+      const list = typeof Intl !== 'undefined' && Intl.supportedValuesOf ? Intl.supportedValuesOf('timeZone') : []
+      return (list && list.length ? list : [s.timezone]).filter(Boolean) as string[]
+    } catch {
+      return [s.timezone].filter(Boolean) as string[]
+    }
+  }, [s.timezone])
+
+  function startEdit(m: Member) {
+    setEditingId(m.id)
+    setDraft({ name: m.name, role: m.role, colour: m.colour || '#2F80ED', email: m.email || '' })
   }
-  const cancelEditMember = () => { setEditingMemberId(null); setMemberDraft({ role: 'child' }) }
-  const saveMember = () => {
-    const name = (memberDraft.name || '').trim()
-    if (!name) { alert('Please enter a name'); return }
-    const role = (memberDraft.role || 'child') as MemberRole
-    const patch = { name, role, colour: memberDraft.colour || undefined, email: memberDraft.email || undefined }
-    if (editingMemberId) s.updateMember(editingMemberId, patch)
-    else s.addMember(patch)
-    cancelEditMember()
+  function cancelEdit() {
+    setEditingId(null)
+    setDraft({})
+  }
+  function saveMember() {
+    const name = (draft.name || '').trim()
+    if (!name) return alert('Please enter a name')
+    const role = (draft.role || 'child') as MemberRole
+    const colour = draft.colour || '#2F80ED'
+    const email = (draft.email || '').trim() || undefined
+
+    if (editingId) s.updateMember(editingId, { name, role, colour, email })
+    else s.addMember({ name, role, colour, email })
+    cancelEdit()
   }
 
-  const removeTag = (t: string) => s.setTags((s.tags || []).filter(x => x !== t))
-  const removeBring = (t: string) => s.setChecklist((s.checklist || []).filter(x => x !== t))
+  function addTag() {
+    const v = tagInput.trim()
+    if (!v) return
+    s.setTags([...(s.tags || []), v])
+    setTagInput('')
+  }
+  function addBring() {
+    const v = bringInput.trim()
+    if (!v) return
+    s.setChecklist([...(s.checklist || []), v])
+    setBringInput('')
+  }
+  function removeTag(v: string) {
+    s.setTags((s.tags || []).filter(x => x !== v))
+  }
+  function removeBring(v: string) {
+    s.setChecklist((s.checklist || []).filter(x => x !== v))
+  }
 
   return (
     <div className="settings-page">
-      <h2>Settings</h2>
-
-      {/* Appearance */}
+      {/* ========== Appearance ========== */}
       <div className="card">
         <h3>Appearance</h3>
         <div className="grid3">
           <label>
             Theme
             <select value={s.theme} onChange={e => s.setTheme(e.target.value as any)}>
-              {THEMES.map(t => <option key={t} value={t}>{t[0].toUpperCase() + t.slice(1)}</option>)}
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+              <option value="auto">Auto</option>
             </select>
           </label>
 
-          <div>
-            <label>Timezone</label>
+          <label>
+            Timezone
             <select value={s.timezone} onChange={e => s.setTimezone(e.target.value)}>
-              {TZ_LIST.map(tz => <option key={tz} value={tz}>{tz}</option>)}
+              {tzOptions.map(tz => <option key={tz} value={tz}>{tz}</option>)}
             </select>
-          </div>
+          </label>
 
-          <div>
-            <label>Week starts on</label>
+          <label>
+            Week starts on
             <select value={s.weekStartMonday ? 'Mon' : 'Sun'} onChange={e => s.setWeekStart(e.target.value === 'Mon')}>
               <option>Mon</option>
               <option>Sun</option>
             </select>
-          </div>
+          </label>
         </div>
       </div>
 
-      {/* Household members */}
+      {/* ========== Household Members ========== */}
       <div className="card">
         <h3>Household</h3>
         <div className="grid2">
@@ -85,8 +117,8 @@ export default function SettingsPage() {
                     {m.email ? <small> · {m.email}</small> : null}
                   </div>
                   <div className="row-right">
-                    <button onClick={() => startEditMember(m)} className="btn btn-small">Edit</button>
-                    <button onClick={() => s.removeMember(m.id)} className="btn btn-small btn-danger">Remove</button>
+                    <button className="btn btn-small" onClick={() => startEdit(m)}>Edit</button>
+                    <button className="btn btn-small btn-danger" onClick={() => s.removeMember(m.id)}>Remove</button>
                   </div>
                 </li>
               ))}
@@ -94,65 +126,91 @@ export default function SettingsPage() {
           </div>
 
           <div>
-            <h4>{editingMemberId ? 'Edit member' : 'Add member'}</h4>
+            <h4 style={{ marginTop: 0 }}>{editingId ? 'Edit member' : 'Add member'}</h4>
             <div className="form-grid">
-              <label>Name<input value={memberDraft.name || ''} onChange={e => setMemberDraft({ ...memberDraft, name: e.target.value })} /></label>
+              <label>Name
+                <input
+                  value={draft.name || ''}
+                  onChange={e => setDraft({ ...draft, name: e.target.value })}
+                  placeholder="Name"
+                />
+              </label>
+
               <label>Role
-                <select value={memberDraft.role || 'child'} onChange={e => setMemberDraft({ ...memberDraft, role: e.target.value as MemberRole })}>
+                <select
+                  value={draft.role || 'child'}
+                  onChange={e => setDraft({ ...draft, role: e.target.value as MemberRole })}
+                >
                   {ROLES.map(r => <option key={r} value={r}>{r}</option>)}
                 </select>
               </label>
-              <label>Colour<input value={memberDraft.colour || ''} onChange={e => setMemberDraft({ ...memberDraft, colour: e.target.value })} placeholder="#2F80ED" /></label>
-              <label>Email (optional)<input value={memberDraft.email || ''} onChange={e => setMemberDraft({ ...memberDraft, email: e.target.value })} /></label>
+
+              <label>Colour
+                <input
+                  type="color"
+                  value={draft.colour || '#2F80ED'}
+                  onChange={e => setDraft({ ...draft, colour: e.target.value })}
+                />
+              </label>
+
+              <label>Email (optional)
+                <input
+                  value={draft.email || ''}
+                  onChange={e => setDraft({ ...draft, email: e.target.value })}
+                  placeholder="name@example.com"
+                />
+              </label>
             </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button onClick={saveMember} className="btn">{editingMemberId ? 'Save' : 'Add'}</button>
-              {editingMemberId && <button onClick={cancelEditMember} className="btn btn-secondary">Cancel</button>}
+
+            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+              <button className="btn" onClick={saveMember}>{editingId ? 'Save' : 'Add'}</button>
+              {editingId && <button className="btn btn-secondary" onClick={cancelEdit}>Cancel</button>}
             </div>
           </div>
         </div>
       </div>
 
-      {/* Tags + Checklist */}
+      {/* ========== Tags & What to Bring ========== */}
       <div className="card">
-        <h3>Tags &amp; Checklist</h3>
+        <h3>Tags &amp; What to Bring</h3>
         <div className="grid2">
           <div>
-            <h4>Common tags</h4>
+            <h4>Common Tags</h4>
             <div className="row-wrap">
-              {(s.tags || []).map(t => <span className="pill" key={t} onClick={() => removeTag(t)}>{t} ×</span>)}
+              {(s.tags || []).map(t => (
+                <span key={t} className="pill" onClick={() => removeTag(t)}>{t} ×</span>
+              ))}
             </div>
-            <div className="row">
-              <input placeholder="Add tag" value={tagInput} onChange={e => setTagInput(e.target.value)} />
-              <button onClick={() => { const t = tagInput.trim(); if (t) s.setTags([...(s.tags || []), t]); setTagInput('') }} className="btn">Add</button>
+            <div className="row" style={{ marginTop: 8 }}>
+              <input
+                placeholder="Add tag"
+                value={tagInput}
+                onChange={e => setTagInput(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && addTag()}
+              />
+              <button className="btn" onClick={addTag}>Add</button>
             </div>
           </div>
+
           <div>
-            <h4>What to bring</h4>
+            <h4>What to Bring</h4>
             <div className="row-wrap">
-              {(s.checklist || []).map(t => <span className="pill" key={t} onClick={() => removeBring(t)}>{t} ×</span>)}
+              {(s.checklist || []).map(t => (
+                <span key={t} className="pill" onClick={() => removeBring(t)}>{t} ×</span>
+              ))}
             </div>
-            <div className="row">
-              <input placeholder="Add item" value={bringInput} onChange={e => setBringInput(e.target.value)} />
-              <button onClick={() => { const t = bringInput.trim(); if (t) s.setChecklist([...(s.checklist || []), t]); setBringInput('') }} className="btn">Add</button>
+            <div className="row" style={{ marginTop: 8 }}>
+              <input
+                placeholder="Add item"
+                value={bringInput}
+                onChange={e => setBringInput(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && addBring()}
+              />
+              <button className="btn" onClick={addBring}>Add</button>
             </div>
           </div>
         </div>
       </div>
-
-      {/* Integrations */}
-      {featureFlags.get().google || featureFlags.get().integrations ? (
-        <div className="card">
-          <h3>Integrations</h3>
-          {featureFlags.get().google && <GoogleConnectCard />}
-          {/* Keep existing ICS shadows intact */}
-          {featureFlags.get().integrations && (
-            <div style={{ marginTop: 12 }}>
-              <IntegrationsPanel />
-            </div>
-          )}
-        </div>
-      ) : null}
     </div>
   )
 }
