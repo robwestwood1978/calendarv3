@@ -1,24 +1,19 @@
 // frontend/src/google/oauth.ts
-// Browser-only OAuth 2.0 Authorization Code Flow with PKCE for Google (GIS compatible).
-// - No secrets stored; uses PKCE (code_verifier/code_challenge).
-// - Stores tokens in localStorage under fc_google_oauth_v1.
-// - Refreshes token when expired (requires 'access_type=offline' and first consent).
-//
-// Configure a Google OAuth client as a "Web application" and add:
-//   - Authorized JavaScript origin: https://<your-domain>
-//   - Authorized redirect URI:     https://<your-domain>/oauth2/callback
-// Then set VITE_GOOGLE_CLIENT_ID (or override via localStorage key fc_google_client_id).
+// OAuth 2.0 Authorization Code w/ PKCE for Google
+// Supports optional client_secret (for tenants that require it).
+// After successful redirect handling, navigates to '/settings' to avoid blank /oauth2/callback route.
 
 type TokenBundle = {
   access_token: string
   refresh_token?: string
-  expires_at?: number        // epoch millis when access token expires
+  expires_at?: number
   scope?: string
   token_type?: string
 }
 
 const LS_KEY = 'fc_google_oauth_v1'
 const LS_CLIENT_ID = 'fc_google_client_id'
+const LS_CLIENT_SECRET = 'fc_google_client_secret'
 
 function nowMs() { return Date.now() }
 function randomString(len = 64) {
@@ -48,6 +43,18 @@ function readClientId(): string | null {
   } catch { return null }
 }
 
+function readClientSecret(): string | null {
+  try {
+    const fromLS = localStorage.getItem(LS_CLIENT_SECRET)?.trim()
+    if (fromLS) return fromLS
+  } catch {}
+  try {
+    const env: any = (import.meta as any).env || {}
+    const cs = (env.VITE_GOOGLE_CLIENT_SECRET || '').trim()
+    return cs || null
+  } catch { return null }
+}
+
 function readTokens(): TokenBundle | null {
   try { return JSON.parse(localStorage.getItem(LS_KEY) || 'null') } catch { return null }
 }
@@ -67,7 +74,6 @@ export function isSignedIn(): boolean {
 }
 
 export function getAccountKey(): string | null {
-  // A stable label for the signed-in Google account (opaque for now)
   return isSignedIn() ? 'google-default' : null
 }
 
@@ -105,6 +111,7 @@ export async function beginAuth(scopes: string[] = ['https://www.googleapis.com/
 async function exchangeCodeForTokens(code: string, code_verifier: string): Promise<TokenBundle> {
   const client_id = readClientId()
   if (!client_id) throw new Error('Missing Google client id.')
+  const client_secret = readClientSecret() // optional
 
   const body = new URLSearchParams({
     client_id,
@@ -113,13 +120,17 @@ async function exchangeCodeForTokens(code: string, code_verifier: string): Promi
     grant_type: 'authorization_code',
     redirect_uri: redirectUri(),
   })
+  if (client_secret) body.set('client_secret', client_secret)
 
   const res = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
   })
-  if (!res.ok) throw new Error(`Token exchange failed (${res.status})`)
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`Token exchange failed (${res.status}): ${text}`)
+  }
   const json: any = await res.json()
   const expires_at = json.expires_in ? (nowMs() + (json.expires_in * 1000) - 30_000) : undefined
   const bundle: TokenBundle = {
@@ -136,19 +147,24 @@ async function exchangeCodeForTokens(code: string, code_verifier: string): Promi
 async function refreshAccessToken(refresh_token: string): Promise<TokenBundle> {
   const client_id = readClientId()
   if (!client_id) throw new Error('Missing Google client id.')
+  const client_secret = readClientSecret() // optional
 
   const body = new URLSearchParams({
     client_id,
     refresh_token,
     grant_type: 'refresh_token',
   })
+  if (client_secret) body.set('client_secret', client_secret)
 
   const res = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
   })
-  if (!res.ok) throw new Error(`Token refresh failed (${res.status})`)
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`Token refresh failed (${res.status}): ${text}`)
+  }
   const json: any = await res.json()
   const expires_at = json.expires_in ? (nowMs() + (json.expires_in * 1000) - 30_000) : undefined
 
@@ -177,14 +193,12 @@ export async function getAccessToken(): Promise<string | null> {
         return null
       }
     } else {
-      // No refresh token; require interactive re-auth
       return null
     }
   }
   return t.access_token
 }
 
-// Call this very early (e.g., in main.tsx before rendering) to catch redirect.
 export async function maybeHandleRedirect(): Promise<boolean> {
   const url = new URL(window.location.href)
   const code = url.searchParams.get('code')
@@ -195,7 +209,7 @@ export async function maybeHandleRedirect(): Promise<boolean> {
   const expected = sessionStorage.getItem('google_oauth_state')
   const verifier = sessionStorage.getItem('google_pkce_verifier') || ''
 
-  // Always clean up URL
+  // Clean URL params
   url.searchParams.delete('code')
   url.searchParams.delete('state')
   url.searchParams.delete('scope')
@@ -208,7 +222,16 @@ export async function maybeHandleRedirect(): Promise<boolean> {
   if (!verifier || !expected || state !== expected) throw new Error('OAuth state mismatch')
 
   await exchangeCodeForTokens(code!, verifier)
-  // Send a friendly toast if you have one
+
   try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Google connected.' })) } catch {}
+
+  // IMPORTANT: move away from /oauth2/callback route so Router renders something
+  const dest = '/settings'
+  if (location.pathname === '/oauth2/callback') {
+    window.history.replaceState({}, '', dest)
+    // If your router doesn't re-render on replaceState, force a navigation:
+    setTimeout(() => { if (location.pathname !== dest) location.assign(dest) }, 0)
+  }
+
   return true
 }
