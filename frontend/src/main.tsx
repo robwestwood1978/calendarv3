@@ -44,20 +44,8 @@ import Toaster from './components/Toaster'
 import { startSyncLoop, maybeRunSync } from './sync/bootstrap'
 import { readSyncConfig, writeSyncConfig } from './sync/core'
 
-/* ===== NEW: Handle Google OAuth redirect on boot (pre-render) ===== */
+/* ===== Handle Google OAuth redirect on boot (no top-level await) ===== */
 import { maybeHandleRedirect } from './google/oauth'
-
-try {
-  await maybeHandleRedirect()
-} catch (e) {
-  console.warn('OAuth redirect handling failed:', e)
-}
-
-// If we’re still on /oauth2/callback for any reason, move to a real page.
-if (location.pathname === '/oauth2/callback') {
-  history.replaceState({}, '', '/settings')
-}
-
 
 function handleSyncURLToggle() {
   try {
@@ -88,7 +76,6 @@ function handleSyncURLToggle() {
       writeSyncConfig(next)
       url.searchParams.delete('sync')
       window.history.replaceState({}, '', url.toString())
-      // fire once now (may be before React mounts) and once after mount
       try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Cloud sync enabled (Google).' })) } catch {}
       setTimeout(() => { try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Cloud sync enabled (Google).' })) } catch {} }, 500)
     } else if (sync === 'off') {
@@ -111,8 +98,7 @@ function bootstrapSync() {
   startSyncLoop() // 5 min interval by default; also ticks on visibility change
 }
 
-// Delay render until we've handled any Google OAuth redirect.
-// This prevents the blank /oauth2/callback screen and finalises tokens before app UI mounts.
+// --------- START APP (no top-level await) ----------
 async function startApp() {
   try {
     await maybeHandleRedirect()
@@ -120,32 +106,26 @@ async function startApp() {
     console.warn('OAuth redirect handling failed:', e)
   }
 
-  // Run safe, idempotent migration (won't overwrite bootstrap defaults)
-  migrateSliceC()
+  // If we’re still on /oauth2/callback for any reason, move to a real route
+  if (location.pathname === '/oauth2/callback') {
+    history.replaceState({}, '', '/settings')
+  }
 
-  // Start sync bootstrap *after* migrations (does nothing unless you used ?sync=on or enabled via Settings)
+  // Run migrations and start sync bootstrap
+  migrateSliceC()
   bootstrapSync()
 
   function RootApp() {
-    // “Pulse” causes the routed subtree to remount whenever auth/agenda/flags change.
     const [pulse, setPulse] = React.useState(0)
-
     return (
       <React.StrictMode>
         <SettingsProvider>
           <AuthProvider>
             <BrowserRouter>
-              {/* Global toaster lives once for whole app */}
               <Toaster />
-
-              {/* Invisible: listens for account/link/toggle/flag changes */}
               <AgendaRefreshBridge onPulse={() => setPulse(p => (p + 1) % 1_000_000)} />
-
-              {/* Fixed overlay that shows Sign in + My Agenda (only when accounts are enabled) */}
               <SignInDock />
-
               <Routes key={pulse}>
-                {/* Remount AppLayout + children when pulse changes (keeps your original App.tsx/nav intact) */}
                 <Route element={<AppLayout />}>
                   <Route index element={<Home />} />
                   <Route path="calendar" element={<Calendar />} />
