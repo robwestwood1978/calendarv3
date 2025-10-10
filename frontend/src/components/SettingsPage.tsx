@@ -3,8 +3,6 @@
 // - Appearance: theme, timezone, week start
 // - Household: list, add, edit, remove, colour, email
 // - Tags & What to Bring: add/remove via pills, Enter-to-add
-// Uses your app classes: card, grid2, grid3, list, row, row-left, row-right,
-// form-grid, pill, btn, btn-secondary, btn-small, dot
 
 import React, { useMemo, useState } from 'react'
 import { useSettings, Member, MemberRole } from '../state/settings'
@@ -180,7 +178,16 @@ export default function SettingsPage() {
             <h4>Common Tags</h4>
             <div className="row-wrap">
               {(s.tags || []).map(t => (
-                <span key={t} className="pill" onClick={() => removeTag(t)}>{t} ×</span>
+                <button
+                  key={t}
+                  type="button"
+                  className="pill pill-action"
+                  onClick={() => removeTag(t)}
+                  aria-label={`Remove tag ${t}`}
+                >
+                  <span className="pill-label">{t}</span>
+                  <span className="pill-x" aria-hidden>×</span>
+                </button>
               ))}
             </div>
             <div className="row" style={{ marginTop: 8 }}>
@@ -199,7 +206,16 @@ export default function SettingsPage() {
             <h4>What to Bring</h4>
             <div className="row-wrap">
               {(s.bringPresets || []).map(t => (
-                <span key={t} className="pill" onClick={() => removeBring(t)}>{t} ×</span>
+                <button
+                  key={t}
+                  type="button"
+                  className="pill pill-action"
+                  onClick={() => removeBring(t)}
+                  aria-label={`Remove item ${t}`}
+                >
+                  <span className="pill-label">{t}</span>
+                  <span className="pill-x" aria-hidden>×</span>
+                </button>
               ))}
             </div>
             <div className="row" style={{ marginTop: 8 }}>
