@@ -47,6 +47,18 @@ import { readSyncConfig, writeSyncConfig } from './sync/core'
 /* ===== NEW: Handle Google OAuth redirect on boot (pre-render) ===== */
 import { maybeHandleRedirect } from './google/oauth'
 
+try {
+  await maybeHandleRedirect()
+} catch (e) {
+  console.warn('OAuth redirect handling failed:', e)
+}
+
+// If we’re still on /oauth2/callback for any reason, move to a real page.
+if (location.pathname === '/oauth2/callback') {
+  history.replaceState({}, '', '/settings')
+}
+
+
 function handleSyncURLToggle() {
   try {
     const url = new URL(window.location.href)
