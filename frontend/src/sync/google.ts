@@ -108,24 +108,27 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
 
         while (true) {
           const params: Record<string, string> = {
-            maxResults: '2500',
-            showDeleted: 'true',
-            singleEvents: 'true',   // expand instances
-            orderBy: 'startTime',
-          }
+  maxResults: '2500',
+  showDeleted: 'true',
+  singleEvents: 'true', // instances only is fine with sync tokens
+}
 
-          if (useSyncToken && sinceToken) {
-            params.syncToken = sinceToken
-          } else {
-            // Normalise to RFC3339 UTC and guarantee timeMax > timeMin
-            const tmin = new Date(rangeStartISO).toISOString()
-            const tmax0 = new Date(rangeEndISO).toISOString()
-            const tmax = (new Date(tmax0).getTime() <= new Date(tmin).getTime())
-              ? new Date(new Date(tmin).getTime() + 60_000).toISOString()
-              : tmax0
-            params.timeMin = tmin
-            params.timeMax = tmax
-          }
+if (useSyncToken && sinceToken) {
+  // IMPORTANT: no orderBy when using syncToken
+  params.syncToken = sinceToken
+} else {
+  // only in window mode; ordering allowed here
+  params.orderBy = 'startTime'
+
+  // normalise to RFC3339 UTC and ensure timeMax > timeMin
+  const tmin = new Date(rangeStartISO).toISOString()
+  const tmax0 = new Date(rangeEndISO).toISOString()
+  const tmax = (new Date(tmax0).getTime() <= new Date(tmin).getTime())
+    ? new Date(new Date(tmin).getTime() + 60_000).toISOString()
+    : tmax0
+  params.timeMin = tmin
+  params.timeMax = tmax
+}
 
           if (pageToken) params.pageToken = pageToken
 
