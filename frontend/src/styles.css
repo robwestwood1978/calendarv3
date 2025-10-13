@@ -482,3 +482,10 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   position:absolute; top:4px; left:8px; right:8px; z-index:3;
   display:flex; flex-wrap:wrap; gap:6px; pointer-events:auto;
 }
+/* Make all-day pills visually match your chips */
+.allDayOverlay .pill {
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 999px;
+  line-height: 1.1;
+}
