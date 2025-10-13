@@ -122,21 +122,20 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
               {/* Wrapper so all-day pills can overlay without pushing the grid */}
               <div className="day-body">
                 {allDay.length > 0 && (
-                  <div className="allDayOverlay">
-                    {allDay.map((item) => (
-                      <button
-                        key={`${item.id}-${item.start}-ad`}
-                        type="button"
-                        className="pill pill-action"
-                        onClick={() => onEdit(item)}
-                        title={item.title}
-                      >
-                        <span className="pill-label">{item.title}</span>
-                        <span className="pill-x" aria-hidden>×</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
+  <div className="allDayOverlay">
+    {allDay.map(item => (
+      <button
+        key={`${item.id}-${item.start}-ad`}
+        type="button"
+        className="pill"
+        onClick={() => onEdit(item)}
+        title={item.title}
+      >
+        {item.title}
+      </button>
+    ))}
+  </div>
+)}
 
                 {/* Time grid for this day */}
                 <DayColumn
