@@ -47,6 +47,9 @@ import { readSyncConfig, writeSyncConfig } from './sync/core'
 /* ===== Handle Google OAuth redirect on boot (no top-level await) ===== */
 import { maybeHandleRedirect } from './google/oauth'
 
+/* ===== NEW: write-through bridge to Google ===== */
+import { installGooglePushBridge } from './sync/push-bridge'
+
 function handleSyncURLToggle() {
   try {
     const url = new URL(window.location.href)
@@ -93,9 +96,8 @@ function handleSyncURLToggle() {
 
 function bootstrapSync() {
   handleSyncURLToggle()
-  // Safe to call → both are no-ops unless sync is enabled
   maybeRunSync()
-  startSyncLoop() // 5 min interval by default; also ticks on visibility change
+  startSyncLoop()
 }
 
 // --------- START APP (no top-level await) ----------
@@ -106,7 +108,6 @@ async function startApp() {
     console.warn('OAuth redirect handling failed:', e)
   }
 
-  // If we’re still on /oauth2/callback for any reason, move to a real route
   if (location.pathname === '/oauth2/callback') {
     history.replaceState({}, '', '/settings')
   }
@@ -114,6 +115,9 @@ async function startApp() {
   // Run migrations and start sync bootstrap
   migrateSliceC()
   bootstrapSync()
+
+  // NEW: start write-through bridge
+  installGooglePushBridge()
 
   function RootApp() {
     const [pulse, setPulse] = React.useState(0)
