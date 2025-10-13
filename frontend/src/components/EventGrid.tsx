@@ -17,7 +17,6 @@ interface GridProps {
 const SNAP_MINUTES = 15
 const CLICK_DRAG_THRESHOLD_PX = 3
 
-/** subscribe to store changes so grids re-compute immediately after saves */
 function useAgendaChangeTick() {
   const [tick, setTick] = useState(0)
   useEffect(() => {
@@ -100,7 +99,6 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
         style={{ gridTemplateColumns: `repeat(${days}, 1fr)`, overflowY: 'auto', overflowX: 'hidden' }}
       >
         {cols.map(d => {
-          // Split today’s events into all-day vs timed (defensive parsing)
           const todays = safeEvents.filter((ev) => {
             const iso = ev?.start
             if (!iso) return false
@@ -116,15 +114,15 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
                 <div className="day-date">{d.toFormat('d LLL')}</div>
               </div>
 
-              {/* Wrapper so all-day pills can overlay without pushing the grid */}
-              <div className="day-body" style={{ position: 'relative' }}>
+              <div className="day-body">
+                {/* All-day overlay (doesn't push the time grid) */}
                 {allDay.length > 0 && (
                   <div className="allDayOverlay">
                     {allDay.map(item => (
                       <button
                         key={`${item.id}-${item.start}-ad`}
                         type="button"
-                        className="pill"
+                        className="chip"
                         onClick={() => onEdit(item)}
                         title={item.title}
                       >
@@ -132,6 +130,11 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
                       </button>
                     ))}
                   </div>
+                )}
+
+                {/* Live "now" line only for today */}
+                {d.hasSame(DateTime.now().setZone(settings.timezone), 'day') && (
+                  <NowLine hourHeight={hourHeight} tz={settings.timezone} />
                 )}
 
                 {/* Time grid for this day */}
@@ -150,6 +153,17 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
       </div>
     </div>
   )
+}
+
+function NowLine({ hourHeight, tz }: { hourHeight: number; tz: string }) {
+  const [, force] = useState(0)
+  useEffect(() => {
+    const id = setInterval(() => force(x => x + 1), 60 * 1000) // tick each minute
+    return () => clearInterval(id)
+  }, [])
+  const now = DateTime.now().setZone(tz)
+  const top = (now.hour + now.minute / 60) * hourHeight
+  return <div className="now-line" style={{ top }} aria-hidden />
 }
 
 /* ---------------- Day/Week columns with live preview + click suppression ---------------- */
@@ -214,7 +228,6 @@ function DayColumn({
       memberLookup: settings.memberLookup,
     })
 
-    // drag anywhere on card
     const onCardMouseDown = (md: React.MouseEvent) => {
       md.stopPropagation(); md.preventDefault()
       dragMetaRef.current = { key, startY: md.clientY, startX: md.clientX, moved: false }
