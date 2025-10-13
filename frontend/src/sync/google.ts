@@ -1,12 +1,13 @@
 // frontend/src/sync/google.ts
-// Google Calendar adapter: pull + robust push with update→create fallback.
-// - Handles 400/409/410 on pull (syncToken/order issues) and push (stale ids).
-// - Proper all-day mapping, attendees, and extendedProperties for tags/bring.
+// Google Calendar adapter (Safe Mode Push)
+// - Pull: unchanged (instances-only, robust handling of 400/409/410).
+// - Push SAFE MODE: send only summary + start/end (+optional plain description/location).
+//   No attendees, no recurrence, no extendedProperties.
+// - Update falls back to create + rebind on 400/404/410.
 
 import { ProviderAdapter, RemoteDelta, PushIntent, PushResult } from './types'
 import { getAccessToken } from '../google/oauth'
 
-type GoogleAttendee = { email?: string; displayName?: string; responseStatus?: string }
 type GoogleEvent = {
   id: string
   status?: string
@@ -20,7 +21,7 @@ type GoogleEvent = {
   recurrence?: string[]
   start?: { dateTime?: string; date?: string; timeZone?: string }
   end?: { dateTime?: string; date?: string; timeZone?: string }
-  attendees?: GoogleAttendee[]
+  attendees?: { email?: string; displayName?: string }[]
   extendedProperties?: { private?: Record<string,string> }
   etag?: string
 }
@@ -37,11 +38,6 @@ function toISO(z?: string) {
   return isNaN(+d) ? undefined : d.toISOString()
 }
 
-function tryParseJSON<T = any>(s?: string): T | undefined {
-  if (!s) return undefined
-  try { return JSON.parse(s) as T } catch { return undefined }
-}
-
 function mapGoogleToLocal(g: GoogleEvent) {
   const isAllDay = !!g.start?.date && !!g.end?.date
   const startISO = isAllDay ? toISO(`${g.start!.date}T00:00:00Z`) : toISO(g.start?.dateTime)
@@ -51,18 +47,11 @@ function mapGoogleToLocal(g: GoogleEvent) {
     ? new Date(new Date(endExclusiveISO).getTime() - 1).toISOString()
     : endExclusiveISO
 
-  const rrule = Array.isArray(g.recurrence)
-    ? g.recurrence.find(x => x?.toUpperCase?.().startsWith('RRULE:'))
-    : undefined
-
   const attendees = Array.isArray(g.attendees)
     ? g.attendees.map(a => a?.email || a?.displayName || '').filter(Boolean)
     : undefined
 
-  const priv = g.extendedProperties?.private || {}
-  const tags = tryParseJSON<string[]>(priv['fc.tags'])
-  const bring = tryParseJSON<string[]>(priv['fc.bring'])
-
+  // We still read notes/location (harmless), but ignore extended props/recurrence in SAFE mode.
   return {
     id: g.id,
     title: g.summary || '(No title)',
@@ -71,10 +60,7 @@ function mapGoogleToLocal(g: GoogleEvent) {
     allDay: isAllDay || undefined,
     location: g.location || undefined,
     notes: g.description || undefined,
-    attendees,
-    tags,
-    checklist: bring,
-    rrule: rrule ? rrule.replace(/^RRULE:/i, '') : undefined,
+    attendees, // kept for local view only
     colour: undefined,
     _remote: [{
       provider: 'google',
@@ -105,36 +91,40 @@ async function gfetch(
   if (res.status === 409) throw new Error('409') // sync token old
   if (res.status === 410) throw new Error('410') // sync token or resource gone
   if (res.status === 429) throw new Error('429') // rate limited
-  if (res.status === 400) throw new Error('400') // bad request (inc. ordering w/ syncToken)
+  if (res.status === 400) throw new Error('400') // bad request (often payload)
   if (!res.ok) throw new Error(`${res.status}`)
   return res.json()
 }
 
-function toGoogleResource(local: any): any {
+/** Ensure valid start/end ordering; fix zero/negative duration */
+function ensureValidInterval(startISO: string, endISO: string): { startISO: string; endISO: string } {
+  const s = new Date(startISO)
+  const e = new Date(endISO)
+  if (!isNaN(+s) && !isNaN(+e) && e.getTime() > s.getTime()) return { startISO, endISO }
+  const fixedEnd = new Date(s.getTime() + 60_000).toISOString() // +1 minute
+  return { startISO, endISO: fixedEnd }
+}
+
+/** SAFE MODE: minimal body only (summary + start/end [+ plain description/location]) */
+function toGoogleResourceSafe(local: any): any {
   const isAllDay = !!local.allDay
+
+  // Normalise incoming ISO and ensure a valid interval
+  const fixed = ensureValidInterval(local.start, local.end)
+
   const body: any = {
     summary: local.title || '',
-    description: local.notes || undefined,
-    location: local.location || undefined,
-    extendedProperties: {
-      private: {
-        'fc.tags': JSON.stringify(local.tags || []),
-        'fc.bring': JSON.stringify(local.checklist || []),
-      }
-    }
   }
 
-  if (Array.isArray(local.attendees) && local.attendees.length) {
-    body.attendees = local.attendees
-      .map((s: string) => (s || '').trim())
-      .filter(Boolean)
-      .map((s: string) => /@/.test(s) ? { email: s } : { displayName: s })
-  }
+  // Optional simple fields that are safe:
+  if (local.notes && typeof local.notes === 'string') body.description = local.notes
+  if (local.location && typeof local.location === 'string') body.location = local.location
 
   if (isAllDay) {
-    const startDate = new Date(local.start)
-    const endInclusive = new Date(local.end)
-    const endExclusive = new Date(endInclusive.getTime() + 1) // +1ms → exclusive date
+    // Convert [start..endInclusive] → Google exclusive end date
+    const startDate = new Date(fixed.startISO)
+    const endInclusive = new Date(fixed.endISO)
+    const endExclusive = new Date(endInclusive.getTime() + 1) // +1ms to hit next day
     const endDate = new Date(Date.UTC(
       endExclusive.getUTCFullYear(),
       endExclusive.getUTCMonth(),
@@ -143,11 +133,16 @@ function toGoogleResource(local: any): any {
     body.start = { date: startDate.toISOString().slice(0, 10) }
     body.end   = { date: endDate.toISOString().slice(0, 10) }
   } else {
-    body.start = { dateTime: new Date(local.start).toISOString() }
-    body.end   = { dateTime: new Date(local.end).toISOString() }
+    body.start = { dateTime: new Date(fixed.startISO).toISOString() }
+    body.end   = { dateTime: new Date(fixed.endISO).toISOString() }
   }
 
-  if (local.rrule) body.recurrence = [`RRULE:${local.rrule}`]
+  // SAFE MODE intentionally omits:
+  // - attendees
+  // - recurrence / rrule
+  // - extendedProperties (tags/bring)
+  // - reminders/visibility/transparency/etc.
+
   return body
 }
 
@@ -253,18 +248,17 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
                 await gfetch(`/calendars/${encodeURIComponent(calId)}/events/${encodeURIComponent(externalId)}`,
                   undefined, { method: 'DELETE' })
               } catch (e: any) {
-                // If already gone (404/410), treat as success
-                if (!['404','410'].includes(e?.message)) throw e
+                if (!['404','410'].includes(e?.message)) throw e // already gone is fine
               }
             }
             results.push({ ok: true, action: 'delete', localId: i.local.id })
             continue
           }
 
-          // CREATE
+          // CREATE (SAFE)
           if (i.action === 'create') {
             const calId = (i.preferredTarget as any)?.calendarId || defaultCal
-            const body = toGoogleResource(i.local)
+            const body = toGoogleResourceSafe(i.local)
             const created = await gfetch(`/calendars/${encodeURIComponent(calId)}/events`,
               undefined, { method: 'POST', body: JSON.stringify(body) }) as GoogleEvent
             results.push({
@@ -274,13 +268,12 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
             continue
           }
 
-          // UPDATE (with fallback to CREATE)
+          // UPDATE (SAFE + fallback to CREATE+rebind)
           if (i.action === 'update') {
             const calId = i.target?.calendarId || defaultCal
             const externalId = i.target?.externalId
-            const body = toGoogleResource(i.local)
+            const body = toGoogleResourceSafe(i.local)
 
-            // If we somehow have no binding, treat as create
             if (!externalId) {
               const created = await gfetch(`/calendars/${encodeURIComponent(calId)}/events`,
                 undefined, { method: 'POST', body: JSON.stringify(body) }) as GoogleEvent
@@ -291,7 +284,6 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
               continue
             }
 
-            // Try PATCH first
             let updated: GoogleEvent | null = null
             try {
               updated = await gfetch(
@@ -300,7 +292,6 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
               ) as GoogleEvent
             } catch (e: any) {
               const code = e?.message
-              // If the resource is gone/invalid/bad, fall back to create + rebind
               if (['400', '404', '410'].includes(code)) {
                 const created = await gfetch(`/calendars/${encodeURIComponent(calId)}/events`,
                   undefined, { method: 'POST', body: JSON.stringify(body) }) as GoogleEvent
@@ -320,7 +311,7 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
             continue
           }
 
-          // Fallback (shouldn't happen)
+          // Fallback
           results.push({ ok: true, action: i.action, localId: i.local.id })
         } catch (e: any) {
           results.push({ ok: false, action: i.action, localId: i.local.id, error: e?.message || String(e) })
