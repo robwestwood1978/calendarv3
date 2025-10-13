@@ -178,7 +178,11 @@ function DayColumn({
   settings: any
 }) {
   const [drag, setDrag] = useState<DragState>(null)
-  const dayStart = day.startOf('day')
+
+
+const zone = settings.timezone || DateTime.local().zoneName
+const dayZ = day.setZone(zone)
+const dayStart = dayZ.startOf('day')
 
   // click suppression for drags
   const dragMetaRef = useRef<{ key?: string; startY?: number; startX?: number; moved?: boolean }>({})
@@ -205,10 +209,11 @@ function DayColumn({
     }
 
     // Zone-normalised geometry so hour ticks and events always align
-    const sZ = s.setZone(day.zoneName as any)
-    const eZ = e.setZone(day.zoneName as any)
-    const top = (sZ.diff(dayStart, 'minutes').minutes / 60) * hourHeight
-    const height = Math.max(24, (eZ.diff(sZ, 'minutes').minutes / 60) * hourHeight)
+
+const sZ = s.setZone(zone)
+const eZ = e.setZone(zone)
+const top = (sZ.diff(dayStart, 'minutes').minutes / 60) * hourHeight
+const height = Math.max(24, (eZ.diff(sZ, 'minutes').minutes / 60) * hourHeight)
 
     const colour = pickEventColour({
       baseColour: ev.colour,
