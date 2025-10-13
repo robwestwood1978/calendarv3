@@ -111,27 +111,35 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
               <div className="day-date">{d.toFormat('d LLL')}</div>
             </div>
             {(() => {
-  // Split today’s events into all-day vs timed
-  const todays = safeEvents.filter(e =>
-    DateTime.fromISO(e.start).hasSame(d, 'day')
-  )
-  const allDay = todays.filter(e => e.allDay)
-  const timed  = todays.filter(e => !e.allDay)
+ {(() => {
+  // Split today’s events into all-day vs timed (defensive parsing)
+  const todays = safeEvents.filter((ev) => {
+    const iso = ev?.start
+    if (!iso) return false
+    try {
+      return DateTime.fromISO(iso).hasSame(d, 'day')
+    } catch {
+      return false
+    }
+  })
+
+  const allDay = todays.filter((ev) => ev.allDay)
+  const timed  = todays.filter((ev) => !ev.allDay)
 
   return (
     <>
       {/* All-day strip (above the time grid) */}
       {allDay.length > 0 && (
         <div className="allDayBar">
-          {allDay.map(e => (
+          {allDay.map((item) => (
             <button
-              key={`${e.id}-${e.start}-ad`}
+              key={`${item.id}-${item.start}-ad`}
               type="button"
               className="pill pill-action"
-              onClick={() => onEdit(e)}
-              title={e.title}
+              onClick={() => onEdit(item)}
+              title={item.title}
             >
-              <span className="pill-label">{e.title}</span>
+              <span className="pill-label">{item.title}</span>
               <span className="pill-x" aria-hidden>×</span>
             </button>
           ))}
