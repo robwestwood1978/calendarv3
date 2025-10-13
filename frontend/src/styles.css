@@ -462,3 +462,17 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   color: #fff;
   border-color: var(--primary);
 }
+.allDayBar {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 6px 8px;
+  border-bottom: 1px solid #eef2f7;
+  background: #fbfdff;
+}
+
+/* You already added pill-action for Settings — reuse it here. If not: */
+.pill-action{display:inline-flex;align-items:center;gap:.4rem;padding:.25rem .5rem;border-radius:999px;border:1px solid #e5e7eb;background:#f8fafc;cursor:pointer;line-height:1}
+.pill-action:hover{background:#eef2f7}
+.pill-action:focus{outline:2px solid #3b82f6;outline-offset:2px}
+.pill-x{opacity:.6}
