@@ -104,61 +104,57 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
         onScroll={onDaysScroll}
         style={{ gridTemplateColumns: `repeat(${days}, 1fr)`, overflowY: 'auto', overflowX: 'hidden' }}
       >
-        {cols.map(d => (
-          <div key={d.toISODate()} className="day-col" onDoubleClick={e => onBackgroundDoubleClick(e, d)}>
-            <div className="day-head">
-              <div className="day-name">{d.toFormat('ccc')}</div>
-              <div className="day-date">{d.toFormat('d LLL')}</div>
+        {cols.map(d => {
+          // Split today’s events into all-day vs timed (defensive parsing)
+          const todays = safeEvents.filter((ev) => {
+            const iso = ev?.start
+            if (!iso) return false
+            try {
+              return DateTime.fromISO(iso).hasSame(d, 'day')
+            } catch {
+              return false
+            }
+          })
+          const allDay = todays.filter((ev) => ev.allDay)
+          const timed  = todays.filter((ev) => !ev.allDay)
+
+          return (
+            <div key={d.toISODate()} className="day-col" onDoubleClick={e => onBackgroundDoubleClick(e, d)}>
+              <div className="day-head">
+                <div className="day-name">{d.toFormat('ccc')}</div>
+                <div className="day-date">{d.toFormat('d LLL')}</div>
+              </div>
+
+              {/* All-day strip (above the time grid) */}
+              {allDay.length > 0 && (
+                <div className="allDayBar">
+                  {allDay.map((item) => (
+                    <button
+                      key={`${item.id}-${item.start}-ad`}
+                      type="button"
+                      className="pill pill-action"
+                      onClick={() => onEdit(item)}
+                      title={item.title}
+                    >
+                      <span className="pill-label">{item.title}</span>
+                      <span className="pill-x" aria-hidden>×</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Time grid for this day */}
+              <DayColumn
+                day={d}
+                hourHeight={hourHeight}
+                events={timed}
+                onEdit={onEdit}
+                onCommitChange={onMoveOrResize}
+                settings={settings}
+              />
             </div>
-          
- {(() => {
-  // Split today’s events into all-day vs timed (defensive parsing)
-  const todays = safeEvents.filter((ev) => {
-    const iso = ev?.start
-    if (!iso) return false
-    try {
-      return DateTime.fromISO(iso).hasSame(d, 'day')
-    } catch {
-      return false
-    }
-  })
-
-  const allDay = todays.filter((ev) => ev.allDay)
-  const timed = todays.filter((ev) => !ev.allDay)
-
-  return (
-    <>
-      {/* All-day strip (above the time grid) */}
-      {allDay.length > 0 && (
-        <div className="allDayBar">
-          {allDay.map((item) => (
-            <button
-              key={`${item.id}-${item.start}-ad`}
-              type="button"
-              className="pill pill-action"
-              onClick={() => onEdit(item)}
-              title={item.title}
-            >
-              <span className="pill-label">{item.title}</span>
-              <span className="pill-x" aria-hidden>×</span>
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* Existing time grid (unchanged props) */}
-      <DayColumn
-        date={d}
-        events={timed}
-        onNewAt={onNewAt}
-        onEdit={onEdit}
-        onMoveOrResize={onMoveOrResize}
-      />
-    </>
-  )
-})()}
-          </div>
-        ))}
+          )
+        })}
       </div>
     </div>
   )
