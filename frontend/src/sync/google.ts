@@ -1,5 +1,5 @@
 // frontend/src/sync/google.ts
-// Incremental Google adapter (instances only; proper all-day mapping)
+// Incremental Google adapter (instances only; proper all-day mapping + robust 400/409/410 handling)
 
 import { ProviderAdapter, RemoteDelta, PushIntent, PushResult } from './types'
 import { getAccessToken } from '../google/oauth'
@@ -29,13 +29,11 @@ type ListResp = {
 
 function toISO(z: string | undefined) {
   if (!z) return undefined
-  // Rely on Date/ISO parsing; Luxon not required here
   const d = new Date(z)
   return isNaN(+d) ? undefined : d.toISOString()
 }
 
 function mapGoogleToLocal(g: GoogleEvent) {
-  // Cancelled events are represented as 'delete' by caller
   const isAllDay = !!g.start?.date && !!g.end?.date
 
   const startISO = isAllDay
@@ -61,7 +59,7 @@ function mapGoogleToLocal(g: GoogleEvent) {
     : undefined
 
   return {
-    id: g.id,                              // instance id (unique per occurrence)
+    id: g.id, // instance id (unique per occurrence)
     title: g.summary || '(No title)',
     start: startISO,
     end: endISO,
@@ -70,7 +68,7 @@ function mapGoogleToLocal(g: GoogleEvent) {
     notes: g.description || undefined,
     attendees,
     rrule: rrule ? rrule.replace(/^RRULE:/i, '') : undefined,
-    colour: undefined, // map colorId→hex if you decide to later
+    colour: undefined, // optional color mapping later
     _remote: [{
       provider: 'google',
       calendarId: '', // filled by caller
@@ -88,6 +86,8 @@ async function gfetch(path: string, params: Record<string, string>): Promise<Lis
   if (res.status === 401) throw new Error('401')
   if (res.status === 409) throw new Error('409')
   if (res.status === 429) throw new Error('429')
+  if (res.status === 410) throw new Error('410')
+  if (res.status === 400) throw new Error('400')
   if (!res.ok) throw new Error(`${res.status}`)
   return res.json()
 }
@@ -110,39 +110,48 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
           const params: Record<string, string> = {
             maxResults: '2500',
             showDeleted: 'true',
-            singleEvents: 'true',   // <— EXPAND INSTANCES
+            singleEvents: 'true',   // expand instances
             orderBy: 'startTime',
           }
+
           if (useSyncToken && sinceToken) {
             params.syncToken = sinceToken
           } else {
-            params.timeMin = rangeStartISO
-            params.timeMax = rangeEndISO
+            // Normalise to RFC3339 UTC and guarantee timeMax > timeMin
+            const tmin = new Date(rangeStartISO).toISOString()
+            const tmax0 = new Date(rangeEndISO).toISOString()
+            const tmax = (new Date(tmax0).getTime() <= new Date(tmin).getTime())
+              ? new Date(new Date(tmin).getTime() + 60_000).toISOString()
+              : tmax0
+            params.timeMin = tmin
+            params.timeMax = tmax
           }
+
           if (pageToken) params.pageToken = pageToken
 
           let data: ListResp
           try {
             data = await gfetch(`/calendars/${encodeURIComponent(calId)}/events`, params)
           } catch (e: any) {
-            // Token invalid → resync from time window
-            if (e.message === '409') {
+            // Invalid/expired syncToken → restart with time window
+            const code = e?.message
+            if (code === '409' || code === '410' || code === '400') {
               useSyncToken = false
               pageToken = undefined
               continue
             }
-            // 429: soft backoff (client side)
-            if (e.message === '429') {
+            // Rate limit → soft backoff
+            if (code === '429') {
               await new Promise(r => setTimeout(r, 1000))
               continue
             }
-            // For 401, getAccessToken already tried refresh; bubble up
+            // 401 already retried in getAccessToken; bubble up
             throw e
           }
 
           const items = Array.isArray(data.items) ? data.items : []
           for (const g of items) {
-            // Defensive master skip: masters have recurrence but no originalStartTime
+            // Defensive: skip series masters (we only want expanded instances)
             const isMaster = Array.isArray(g.recurrence) && g.recurrence.length > 0 && !g.originalStartTime
             if (isMaster) continue
 
@@ -157,7 +166,8 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
 
             const payload = mapGoogleToLocal(g)
             if (!payload) continue
-            // attach calendarId to remote binding
+
+            // Attach calendarId to remote binding
             if (payload._remote && payload._remote[0]) {
               payload._remote[0].calendarId = calId
             }
