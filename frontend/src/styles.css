@@ -16,7 +16,12 @@
   /* Controls */
   --head-h: 34px;        /* unified header height for gutter/day columns */
   --hour-h: 60px;        /* default hour height; overridden inline for density */
-  --font-scale: 1;       /* hook if you add font scaling later */
+  --font-scale: 1;
+
+  /* NEW: generic chip/pill palette (used by all-day pills) */
+  --chip-bg: #f1f5f9;    /* slate-100 */
+  --chip-fg: #0f172a;    /* slate-900 */
+  --chip-border: #e2e8f0;/* slate-200 */
 }
 
 .theme-dark {
@@ -32,6 +37,10 @@
   --success: #34d399;
   --danger: #f87171;
   --shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+
+  --chip-bg: #1f2937;     /* gray-800 */
+  --chip-fg: #e5e7eb;     /* gray-200 */
+  --chip-border: #374151; /* gray-700 */
 }
 
 html, body, #root {
@@ -89,20 +98,12 @@ input:focus, select:focus, textarea:focus, button:focus {
   gap: .5rem;
 }
 
-.toolbar .center {
-  font-weight: 700;
-  letter-spacing: .2px;
-}
+.toolbar .center { font-weight: 700; letter-spacing: .2px; }
 
 .toolbar select,
-.toolbar input {
-  height: 34px;
-  padding: 0 .6rem;
-}
+.toolbar input { height: 34px; padding: 0 .6rem; }
 
-.toolbar input {
-  min-width: 180px;
-}
+.toolbar input { min-width: 180px; }
 
 button {
   padding: .4rem .7rem;
@@ -130,11 +131,7 @@ button.primary:hover { filter: brightness(0.96); }
 }
 
 /* ==================== Time Grid ==================== */
-.timewrap {
-  flex: 1;
-  display: flex;
-  overflow: hidden;
-}
+.timewrap { flex: 1; display: flex; overflow: hidden; }
 
 /* Gutter on the left with aligned header spacer */
 .time-gutter {
@@ -159,10 +156,7 @@ button.primary:hover { filter: brightness(0.96); }
 }
 
 /* Ensure day columns render horizontally */
-.grid-days {
-  display: grid;              /* gridTemplateColumns set inline by React */
-  overflow: auto;             /* scroll grid area, not the gutter */
-}
+.grid-days { display: grid; overflow: auto; }
 
 /* Each day column */
 .day-col {
@@ -191,7 +185,7 @@ button.primary:hover { filter: brightness(0.96); }
 /* The scrolling stack that holds events and the hour grid background */
 .day-stack {
   position: relative;
-  height: calc(24 * var(--hour-h)); /* actual hour height is set inline */
+  height: calc(24 * var(--hour-h));
   background-image: linear-gradient(
     to bottom,
     transparent calc(var(--hour-h) - 1px),
@@ -238,31 +232,12 @@ button.primary:hover { filter: brightness(0.96); }
 .event .time { font-size: .72rem; opacity: .92; }
 
 /* Drag/resize handles */
-.drag-handle {
-  cursor: move;
-  width: 100%;
-  height: 6px;
-  border-radius: 6px 6px 0 0;
-  background: rgba(255,255,255,.35);
-  transition: background .15s;
-}
-.resize-handle {
-  cursor: ns-resize;
-  width: 100%;
-  height: 6px;
-  border-radius: 0 0 6px 6px;
-  background: rgba(255,255,255,.35);
-  transition: background .15s;
-}
-.event:hover .drag-handle,
-.event:hover .resize-handle { background: rgba(255,255,255,.5); }
+.drag-handle { cursor: move; width: 100%; height: 6px; border-radius: 6px 6px 0 0; background: rgba(255,255,255,.35); transition: background .15s; }
+.resize-handle { cursor: ns-resize; width: 100%; height: 6px; border-radius: 0 0 6px 6px; background: rgba(255,255,255,.35); transition: background .15s; }
+.event:hover .drag-handle, .event:hover .resize-handle { background: rgba(255,255,255,.5); }
 
 /* ==================== Month Grid ==================== */
-.month-grid {
-  display: grid;
-  grid-template-columns: repeat(7, 1fr);
-  flex: 1;
-}
+.month-grid { display: grid; grid-template-columns: repeat(7, 1fr); flex: 1; }
 
 .mcell {
   border: 1px solid var(--border);
@@ -272,29 +247,16 @@ button.primary:hover { filter: brightness(0.96); }
   flex-direction: column;
   background: var(--bg);
 }
-
 .mcell.dim { background: var(--panel); color: var(--muted); }
 
-.mhead {
-  font-size: .75rem;
-  font-weight: 700;
-  margin-bottom: 6px;
-  color: var(--muted);
-}
+.mhead { font-size: .75rem; font-weight: 700; margin-bottom: 6px; color: var(--muted); }
 
 .mlist { display: flex; flex-direction: column; gap: 4px; }
 
 .mitem {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 6px;
-  font-size: .75rem;
-  background: #e0f2fe;
-  color: #0c4a6e;
-  border: 1px solid #cdeafe;
-  border-radius: 8px;
-  padding: 4px 6px;
+  display: flex; justify-content: space-between; align-items: center; gap: 6px;
+  font-size: .75rem; background: #e0f2fe; color: #0c4a6e;
+  border: 1px solid #cdeafe; border-radius: 8px; padding: 4px 6px;
   transition: transform .04s ease, background-color .15s ease, filter .15s;
 }
 .mitem:hover { transform: translateY(-1px); }
@@ -302,92 +264,52 @@ button.primary:hover { filter: brightness(0.96); }
 .mtime { color: #075985; font-variant-numeric: tabular-nums; }
 
 /* ==================== Modal ==================== */
-.modal-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(2, 6, 23, 0.55);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 50;
-}
+.modal-backdrop { position: fixed; inset: 0; background: rgba(2, 6, 23, 0.55); display: flex; align-items: center; justify-content: center; z-index: 50; }
 
 .modal {
   background: var(--bg);
   width: 640px;
   max-width: 96%;
-  max-height: 92vh;          /* NEW: constrain modal height */
+  max-height: 92vh;
   border-radius: 16px;
-  overflow: hidden;          /* header/footer stay visible; content scrolls */
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border);
   box-shadow: var(--shadow);
 }
+.modal.modern .modal-h, .modal.modern .modal-f { background: var(--panel); }
 
-.modal.modern .modal-h,
-.modal.modern .modal-f { background: var(--panel); }
-
-.modal-h,
-.modal-f {
+.modal-h, .modal-f {
   padding: .75rem .9rem;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+  display: flex; justify-content: space-between; align-items: center;
   border-bottom: 1px solid var(--border);
 }
 .modal-f { border-top: 1px solid var(--border); border-bottom: none; }
 
-/* NEW: make the body scroll, not the whole modal */
+/* Body scrolls, header/footer fixed */
 .modal-b {
-  padding: 1rem;
-  display: flex;
-  flex-direction: column;
-  gap: .75rem;
-  flex: 1 1 auto;         /* take remaining height */
-  min-height: 0;          /* allow child overflow */
-  overflow-y: auto;       /* scroll content so footer stays visible */
+  padding: 1rem; display: flex; flex-direction: column; gap: .75rem;
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
 }
-
-.modal-b label {
-  display: flex;
-  flex-direction: column;
-  gap: .25rem;
-  font-size: .9rem;
-}
-
-.modal-b input,
-.modal-b textarea,
-.modal-b select {
-  padding: .45rem .55rem;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: #fff;
-  color: var(--text);
-}
-
+.modal-b label { display: flex; flex-direction: column; gap: .25rem; font-size: .9rem; }
+.modal-b input, .modal-b textarea, .modal-b select { padding: .45rem .55rem; border: 1px solid var(--border); border-radius: 10px; background: #fff; color: var(--text); }
 .modal-b textarea { min-height: 68px; resize: vertical; }
-
-.modal-f button.primary {
-  background: var(--primary);
-  color: #fff;
-  padding: .45rem .8rem;
-  border-radius: 10px;
-}
+.modal-f button.primary { background: var(--primary); color: #fff; padding: .45rem .8rem; border-radius: 10px; }
 
 /* ==================== Chips & Small Controls ==================== */
-.chips { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .25rem; }
-.chip {
-  background: var(--panel-2);
-  border: 1px solid var(--border);
+.pill, .chip {
+  background: var(--chip-bg);
+  color: var(--chip-fg);
+  border: 1px solid var(--chip-border);
   padding: .2rem .6rem;
   border-radius: 999px;
   font-size: .78rem;
   display: inline-flex; align-items: center; gap: .35rem;
-  color: var(--text);
 }
 .chip.active { background: var(--primary); border-color: var(--primary); color: #fff; }
 .chip-x { background: transparent; border: none; cursor: pointer; font-size: .9rem; line-height: 1; padding: 0; color: inherit; }
+.chips { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .25rem; }
 .chips.selectable button.chip { cursor: pointer; }
 
 .days { display: flex; gap: .35rem; flex-wrap: wrap; margin-top: .35rem; }
@@ -398,36 +320,15 @@ button.primary:hover { filter: brightness(0.96); }
 .admin { padding: 1rem; }
 .admin h2 { margin: 0 0 1rem; }
 
-.card {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: .9rem;
-  margin-bottom: 1rem;
-  box-shadow: var(--shadow);
-}
-
+.card { background: var(--bg); border: 1px solid var(--border); border-radius: 16px; padding: .9rem; margin-bottom: 1rem; box-shadow: var(--shadow); }
 .row { display: flex; gap: .5rem; align-items: center; }
 .row.between { justify-content: space-between; }
 .row.gap { gap: .75rem; }
-
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: .6rem; }
 .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: .6rem; }
 
-.rule {
-  display: flex;
-  align-items: center;
-  gap: .6rem;
-  padding: .35rem 0;
-}
-.rule .pill {
-  font-size: .72rem;
-  font-weight: 700;
-  background: var(--panel);
-  padding: .1rem .45rem;
-  border-radius: 6px;
-  text-transform: capitalize;
-}
+.rule { display: flex; align-items: center; gap: .6rem; padding: .35rem 0; }
+.rule .pill { font-size: .72rem; font-weight: 700; background: var(--panel); padding: .1rem .45rem; border-radius: 6px; text-transform: capitalize; }
 .rule .preview { width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--border); }
 .rule .hex { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .72rem; color: var(--muted); }
 
@@ -435,62 +336,29 @@ button.primary:hover { filter: brightness(0.96); }
 .hint { font-size: .78rem; color: var(--muted); }
 button:disabled { opacity: .55; cursor: not-allowed; }
 
-/* Bottom nav (single, non-duplicated block) */
+/* Bottom nav */
 .bottom-nav {
-  position: fixed;
-  bottom: 12px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  display: flex;
-  gap: .25rem;
-  padding: .25rem;
-  box-shadow: var(--shadow);
-  z-index: 40;
+  position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
+  background: var(--bg); border: 1px solid var(--border); border-radius: 16px;
+  display: flex; gap: .25rem; padding: .25rem; box-shadow: var(--shadow); z-index: 40;
 }
-.nav-btn {
-  padding: .45rem .8rem;
-  border-radius: 12px;
-  color: var(--text);
-  text-decoration: none;
-  border: 1px solid transparent;
-}
-.nav-btn.active {
-  background: var(--primary);
-  color: #fff;
-  border-color: var(--primary);
-}
-.allDayBar {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-  padding: 6px 8px;
-  border-bottom: 1px solid #eef2f7;
-  background: #fbfdff;
-}
+.nav-btn { padding: .45rem .8rem; border-radius: 12px; color: var(--text); text-decoration: none; border: 1px solid transparent; }
+.nav-btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
 
-/* You already added pill-action for Settings — reuse it here. If not: */
-.pill-action{display:inline-flex;align-items:center;gap:.4rem;padding:.25rem .5rem;border-radius:999px;border:1px solid #e5e7eb;background:#f8fafc;cursor:pointer;line-height:1}
-.pill-action:hover{background:#eef2f7}
-.pill-action:focus{outline:2px solid #3b82f6;outline-offset:2px}
-.pill-x{opacity:.6}
-
-.day-body{position:relative}
+/* ======= All-day overlay pills (do not push the grid) ======= */
+.day-body { position: relative; }
 .allDayOverlay{
   position:absolute; top:4px; left:8px; right:8px; z-index:3;
   display:flex; flex-wrap:wrap; gap:6px; pointer-events:auto;
 }
-/* Make all-day pills visually match your chips */
 .allDayOverlay .pill {
   font-weight: 600;
   padding: 4px 10px;
   border-radius: 999px;
   line-height: 1.1;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.allDayOverlay .pill {
-  background: var(--chip-bg);
-  color: var(--chip-fg);
-  border: 1px solid var(--border);
-}
+.allDayOverlay .pill:hover { filter: brightness(0.98); }
