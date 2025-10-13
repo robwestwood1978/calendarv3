@@ -108,27 +108,27 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
 
         while (true) {
           const params: Record<string, string> = {
-  maxResults: '2500',
-  showDeleted: 'true',
-  singleEvents: 'true', // instances only is fine with sync tokens
-}
+            maxResults: '2500',
+            showDeleted: 'true',
+            singleEvents: 'true', // instances only is fine with sync tokens
+          }
 
-if (useSyncToken && sinceToken) {
-  // IMPORTANT: no orderBy when using syncToken
-  params.syncToken = sinceToken
-} else {
-  // only in window mode; ordering allowed here
-  params.orderBy = 'startTime'
+          if (useSyncToken && sinceToken) {
+            // IMPORTANT: no orderBy/timeMin/timeMax when using syncToken
+            params.syncToken = sinceToken
+          } else {
+            // only in window mode; ordering allowed here
+            params.orderBy = 'startTime'
 
-  // normalise to RFC3339 UTC and ensure timeMax > timeMin
-  const tmin = new Date(rangeStartISO).toISOString()
-  const tmax0 = new Date(rangeEndISO).toISOString()
-  const tmax = (new Date(tmax0).getTime() <= new Date(tmin).getTime())
-    ? new Date(new Date(tmin).getTime() + 60_000).toISOString()
-    : tmax0
-  params.timeMin = tmin
-  params.timeMax = tmax
-}
+            // normalise to RFC3339 UTC and ensure timeMax > timeMin
+            const tmin = new Date(rangeStartISO).toISOString()
+            const tmax0 = new Date(rangeEndISO).toISOString()
+            const tmax = (new Date(tmax0).getTime() <= new Date(tmin).getTime())
+              ? new Date(new Date(tmin).getTime() + 60_000).toISOString()
+              : tmax0
+            params.timeMin = tmin
+            params.timeMax = tmax
+          }
 
           if (pageToken) params.pageToken = pageToken
 
@@ -136,7 +136,7 @@ if (useSyncToken && sinceToken) {
           try {
             data = await gfetch(`/calendars/${encodeURIComponent(calId)}/events`, params)
           } catch (e: any) {
-            // Invalid/expired syncToken → restart with time window
+            // Invalid/expired syncToken or ordering conflict → restart with time window
             const code = e?.message
             if (code === '409' || code === '410' || code === '400') {
               useSyncToken = false
