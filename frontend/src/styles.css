@@ -489,3 +489,8 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   border-radius: 999px;
   line-height: 1.1;
 }
+.allDayOverlay .pill {
+  background: var(--chip-bg);
+  color: var(--chip-fg);
+  border: 1px solid var(--border);
+}
