@@ -110,14 +110,45 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
               <div className="day-name">{d.toFormat('ccc')}</div>
               <div className="day-date">{d.toFormat('d LLL')}</div>
             </div>
-            <DayColumn
-              day={d}
-              hourHeight={hourHeight}
-              events={safeEvents.filter(e => DateTime.fromISO(e.start).hasSame(d, 'day') && !e.allDay)}
-              onEdit={onEdit}
-              onCommitChange={(ev) => { onMoveOrResize(ev); toast('Saved'); }}
-              settings={settings}
-            />
+            {(() => {
+  // Split today’s events into all-day vs timed
+  const todays = safeEvents.filter(e =>
+    DateTime.fromISO(e.start).hasSame(d, 'day')
+  )
+  const allDay = todays.filter(e => e.allDay)
+  const timed  = todays.filter(e => !e.allDay)
+
+  return (
+    <>
+      {/* All-day strip (above the time grid) */}
+      {allDay.length > 0 && (
+        <div className="allDayBar">
+          {allDay.map(e => (
+            <button
+              key={`${e.id}-${e.start}-ad`}
+              type="button"
+              className="pill pill-action"
+              onClick={() => onEdit(e)}
+              title={e.title}
+            >
+              <span className="pill-label">{e.title}</span>
+              <span className="pill-x" aria-hidden>×</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Existing time grid (unchanged props) */}
+      <DayColumn
+        date={d}
+        events={timed}
+        onNewAt={onNewAt}
+        onEdit={onEdit}
+        onMoveOrResize={onMoveOrResize}
+      />
+    </>
+  )
+})()}
           </div>
         ))}
       </div>
