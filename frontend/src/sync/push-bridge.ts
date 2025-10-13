@@ -1,27 +1,22 @@
 // frontend/src/sync/push-bridge.ts
-// Zero-touch write bridge: watches localStorage (fc_events_v1),
-// diffs changes, and pushes creates/updates/deletes to Google.
+// Watches localStorage (fc_events_v1), diffs changes, pushes to Google,
+// and writes back returned bindings so future edits hit the same event.
 
 import { createGoogleAdapter } from './google'
-import type { PushIntent } from './types'
+import type { PushIntent, PushResult } from './types'
 import type { EventRecord } from '../lib/recurrence'
 import { readSyncConfig } from './core'
 
 type ById = Record<string, EventRecord>
 
-// ----- helpers ---------------------------------------------------------------
-
 function parseEvents(raw: string | null): EventRecord[] {
   if (!raw) return []
   try {
     const obj = JSON.parse(raw)
-    // support either { events: [...] } or bare array
     if (Array.isArray(obj)) return obj as EventRecord[]
     if (Array.isArray(obj?.events)) return obj.events as EventRecord[]
     return []
-  } catch {
-    return []
-  }
+  } catch { return [] }
 }
 
 function indexById(list: EventRecord[]): ById {
@@ -31,7 +26,6 @@ function indexById(list: EventRecord[]): ById {
 }
 
 function equalShallow(a: EventRecord, b: EventRecord): boolean {
-  // Compare the fields Google cares about; ignore local-only metadata
   return (
     a.title === b.title &&
     a.start === b.start &&
@@ -48,9 +42,19 @@ function bindingForGoogle(e: EventRecord) {
   return r.find((x: any) => x?.provider === 'google')
 }
 
-// Build a single Google adapter from current config
+function setBinding(e: EventRecord, bound: any) {
+  const list = Array.isArray((e as any)._remote) ? (e as any)._remote.slice() : []
+  const idx = list.findIndex((x: any) => x?.provider === 'google')
+  if (idx >= 0) list[idx] = bound
+  else list.push(bound)
+  ;(e as any)._remote = list
+}
+
+function readCfg() {
+  try { return readSyncConfig() } catch { return null }
+}
 function getGoogle() {
-  const cfg = readSyncConfig()
+  const cfg = readCfg()
   const g = cfg?.providers?.google
   if (!cfg?.enabled || !g?.enabled) return null
   const calendars =
@@ -58,25 +62,43 @@ function getGoogle() {
   return createGoogleAdapter({ calendars })
 }
 
-// ----- main installer --------------------------------------------------------
+function saveEvents(list: EventRecord[], asObjectForm: boolean) {
+  // preserve original shape
+  const raw = localStorage.getItem('fc_events_v1')
+  try {
+    const parsed = JSON.parse(raw || 'null')
+    if (Array.isArray(parsed)) {
+      localStorage.setItem('fc_events_v1', JSON.stringify(list))
+    } else {
+      localStorage.setItem('fc_events_v1', JSON.stringify({ ...(parsed || {}), events: list }))
+    }
+  } catch {
+    localStorage.setItem('fc_events_v1', JSON.stringify(list))
+  }
+  window.dispatchEvent(new Event('storage'))
+  window.dispatchEvent(new CustomEvent('fc:events-changed'))
+}
 
 export function installGooglePushBridge() {
   let prevRaw = localStorage.getItem('fc_events_v1')
-  let prevIdx = indexById(parseEvents(prevRaw))
+  let prevList = parseEvents(prevRaw)
+  let prevIdx = indexById(prevList)
+  const objectForm = (() => { try { const p = JSON.parse(prevRaw || 'null'); return !Array.isArray(p) } catch { return false } })()
 
   const runDiff = async () => {
     const google = getGoogle()
     if (!google) return
 
     const nowRaw = localStorage.getItem('fc_events_v1')
-    if (nowRaw === prevRaw) return // no change
-
     const nowList = parseEvents(nowRaw)
     const nowIdx  = indexById(nowList)
 
+    // no visible change
+    if (nowRaw === prevRaw) return
+
     const intents: PushIntent[] = []
 
-    // 1) Deletions
+    // deletions
     for (const id in prevIdx) {
       if (!nowIdx[id]) {
         const oldEv = prevIdx[id]
@@ -85,21 +107,19 @@ export function installGooglePushBridge() {
       }
     }
 
-    // 2) Creates + Updates
+    // creates/updates
     for (const id in nowIdx) {
       const cur = nowIdx[id]
-      const before = prevIdx[id]
+      const was = prevIdx[id]
       const bind = bindingForGoogle(cur)
 
-      if (!before) {
-        // New event
+      if (!was) {
         intents.push(
           bind
             ? { action: 'update', local: cur, target: bind }
             : { action: 'create', local: cur, preferredTarget: { provider: 'google', calendarId: undefined } }
         )
-      } else if (!equalShallow(cur, before)) {
-        // Changed event
+      } else if (!equalShallow(cur, was)) {
         intents.push(
           bind
             ? { action: 'update', local: cur, target: bind }
@@ -108,37 +128,53 @@ export function installGooglePushBridge() {
       }
     }
 
-    if (intents.length) {
-      try {
-        const results = await google.push(intents)
-        const fail = results.find(r => !r.ok)
-        if (fail) {
-          window.dispatchEvent(new CustomEvent('toast', { detail: `Google save failed: ${fail.error || 'unknown'}` }))
+    if (intents.length === 0) { prevRaw = nowRaw; prevList = nowList; prevIdx = nowIdx; return }
+
+    let results: PushResult[] = []
+    try {
+      results = await google.push(intents)
+    } catch (e: any) {
+      window.dispatchEvent(new CustomEvent('toast', { detail: `Google sync error: ${e?.message || e}` }))
+      // keep snapshot to avoid thrash but don’t write bindings
+      prevRaw = nowRaw; prevList = nowList; prevIdx = nowIdx
+      return
+    }
+
+    // apply returned bindings to current list
+    let mutated = false
+    for (const r of results) {
+      if (!r.ok) {
+        window.dispatchEvent(new CustomEvent('toast', { detail: `Google save failed: ${r.error || 'unknown'}` }))
+        continue
+      }
+      if ((r.action === 'create' || r.action === 'update') && r.bound) {
+        const ev = nowIdx[r.localId]
+        if (ev) {
+          setBinding(ev, r.bound)
+          mutated = true
         }
-      } catch (e: any) {
-        window.dispatchEvent(new CustomEvent('toast', { detail: `Google sync error: ${e?.message || e}` }))
       }
     }
 
-    // update snapshot
-    prevRaw = nowRaw
-    prevIdx = nowIdx
+    if (mutated) {
+      // write back to storage with the same shape it had
+      const mergedList = Object.values(nowIdx)
+      saveEvents(mergedList, objectForm)
+    }
+
+    prevRaw = localStorage.getItem('fc_events_v1')
+    prevList = parseEvents(prevRaw)
+    prevIdx = indexById(prevList)
   }
 
-  // Run on local changes + periodic guard tick
-  const onStorage = (e: StorageEvent | Event) => {
-    try { runDiff() } catch {}
-  }
+  const onStorage = () => { runDiff().catch(() => {}) }
   window.addEventListener('storage', onStorage)
   window.addEventListener('fc:events-changed', onStorage as any)
 
-  // Poll as a fallback (handles same-tab writes that don’t fire storage)
-  const interval = setInterval(runDiff, 1500)
+  const interval = setInterval(() => runDiff().catch(() => {}), 1500)
 
-  // immediate first pass
   runDiff().catch(() => {})
 
-  // Expose a cleanup hook if you ever need it
   ;(window as any).__fc_uninstallGooglePush = () => {
     window.removeEventListener('storage', onStorage)
     window.removeEventListener('fc:events-changed', onStorage as any)
