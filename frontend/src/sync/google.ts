@@ -1,9 +1,7 @@
 // frontend/src/sync/google.ts
-// Google Calendar adapter: incremental pull + real push (create/update/delete)
-// - Handles 400/409/410 gracefully when using syncToken
-// - Maps all-day properly (Google end date is exclusive)
-// - Writes/reads extra metadata via extendedProperties.private
-// - Sends attendees to Google
+// Google Calendar adapter: pull + robust push with update→create fallback.
+// - Handles 400/409/410 on pull (syncToken/order issues) and push (stale ids).
+// - Proper all-day mapping, attendees, and extendedProperties for tags/bring.
 
 import { ProviderAdapter, RemoteDelta, PushIntent, PushResult } from './types'
 import { getAccessToken } from '../google/oauth'
@@ -20,8 +18,8 @@ type GoogleEvent = {
   recurringEventId?: string
   originalStartTime?: { dateTime?: string; date?: string; timeZone?: string }
   recurrence?: string[]
-  start?: { dateTime?: string; date?: string; timeZone?: string; date?: string }
-  end?: { dateTime?: string; date?: string; timeZone?: string; date?: string }
+  start?: { dateTime?: string; date?: string; timeZone?: string }
+  end?: { dateTime?: string; date?: string; timeZone?: string }
   attendees?: GoogleAttendee[]
   extendedProperties?: { private?: Record<string,string> }
   etag?: string
@@ -46,15 +44,8 @@ function tryParseJSON<T = any>(s?: string): T | undefined {
 
 function mapGoogleToLocal(g: GoogleEvent) {
   const isAllDay = !!g.start?.date && !!g.end?.date
-
-  const startISO = isAllDay
-    ? toISO(`${g.start!.date}T00:00:00Z`)
-    : toISO(g.start?.dateTime)
-
-  const endExclusiveISO = isAllDay
-    ? toISO(`${g.end!.date}T00:00:00Z`)
-    : toISO(g.end?.dateTime)
-
+  const startISO = isAllDay ? toISO(`${g.start!.date}T00:00:00Z`) : toISO(g.start?.dateTime)
+  const endExclusiveISO = isAllDay ? toISO(`${g.end!.date}T00:00:00Z`) : toISO(g.end?.dateTime)
   if (!startISO || !endExclusiveISO) return null
   const endISO = isAllDay
     ? new Date(new Date(endExclusiveISO).getTime() - 1).toISOString()
@@ -73,7 +64,7 @@ function mapGoogleToLocal(g: GoogleEvent) {
   const bring = tryParseJSON<string[]>(priv['fc.bring'])
 
   return {
-    id: g.id, // instance id (unique per occurrence when singleEvents=true)
+    id: g.id,
     title: g.summary || '(No title)',
     start: startISO,
     end: endISO,
@@ -111,18 +102,14 @@ async function gfetch(
     },
   })
   if (res.status === 401) throw new Error('401')
-  if (res.status === 409) throw new Error('409') // syncToken old
-  if (res.status === 410) throw new Error('410') // syncToken expired
-  if (res.status === 429) throw new Error('429') // rate limits
-  if (res.status === 400) {
-    // Bubble 400 (e.g. syncTokenWithNonDefaultOrdering) as 400
-    throw new Error('400')
-  }
+  if (res.status === 409) throw new Error('409') // sync token old
+  if (res.status === 410) throw new Error('410') // sync token or resource gone
+  if (res.status === 429) throw new Error('429') // rate limited
+  if (res.status === 400) throw new Error('400') // bad request (inc. ordering w/ syncToken)
   if (!res.ok) throw new Error(`${res.status}`)
   return res.json()
 }
 
-// Build a Google resource from our local event
 function toGoogleResource(local: any): any {
   const isAllDay = !!local.allDay
   const body: any = {
@@ -141,17 +128,13 @@ function toGoogleResource(local: any): any {
     body.attendees = local.attendees
       .map((s: string) => (s || '').trim())
       .filter(Boolean)
-      .map((s: string) => {
-        const looksEmail = /@/.test(s)
-        return looksEmail ? { email: s } : { displayName: s }
-      })
+      .map((s: string) => /@/.test(s) ? { email: s } : { displayName: s })
   }
 
   if (isAllDay) {
-    // local end is inclusive → convert to exclusive date
     const startDate = new Date(local.start)
     const endInclusive = new Date(local.end)
-    const endExclusive = new Date(endInclusive.getTime() + 1) // +1ms
+    const endExclusive = new Date(endInclusive.getTime() + 1) // +1ms → exclusive date
     const endDate = new Date(Date.UTC(
       endExclusive.getUTCFullYear(),
       endExclusive.getUTCMonth(),
@@ -165,11 +148,8 @@ function toGoogleResource(local: any): any {
   }
 
   if (local.rrule) body.recurrence = [`RRULE:${local.rrule}`]
-
   return body
 }
-
-// ---------- adapter ----------
 
 export function createGoogleAdapter(opts: { accountKey?: string; calendars?: string[] }): ProviderAdapter {
   const calendars = (opts.calendars && opts.calendars.length) ? opts.calendars : ['primary']
@@ -189,15 +169,14 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
           const params: Record<string, string> = {
             maxResults: '2500',
             showDeleted: 'true',
-            singleEvents: 'true', // expand instances
+            singleEvents: 'true',
           }
 
           if (useSyncToken && sinceToken) {
-            // IMPORTANT: no orderBy with syncToken
+            // IMPORTANT: no orderBy when using syncToken
             params.syncToken = sinceToken
           } else {
             params.orderBy = 'startTime'
-            // RFC3339 sanity
             const tmin = new Date(rangeStartISO).toISOString()
             const tmax0 = new Date(rangeEndISO).toISOString()
             const tmax = (new Date(tmax0).getTime() <= new Date(tmin).getTime())
@@ -214,7 +193,7 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
           } catch (e: any) {
             const code = e?.message
             if (code === '409' || code === '410' || code === '400') {
-              // reset to window mode
+              // reset to window mode and retry
               useSyncToken = false
               pageToken = undefined
               continue
@@ -228,7 +207,7 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
 
           const items = Array.isArray(data.items) ? data.items : []
           for (const g of items) {
-            // Skip series masters (we want instances only)
+            // Skip series masters (instances only)
             const isMaster = Array.isArray(g.recurrence) && g.recurrence.length > 0 && !g.originalStartTime
             if (isMaster) continue
 
@@ -259,24 +238,30 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
       return { token: nextSyncToken || sinceToken || null, events }
     },
 
-    // -------- PUSH (create / update / delete) --------
     async push(intents: PushIntent[]) {
       const results: PushResult[] = []
       const defaultCal = calendars[0] || 'primary'
 
       for (const i of intents) {
         try {
+          // DELETE
           if (i.action === 'delete') {
             const calId = i.target?.calendarId || defaultCal
             const externalId = i.target?.externalId
             if (externalId) {
-              await gfetch(`/calendars/${encodeURIComponent(calId)}/events/${encodeURIComponent(externalId)}`,
-                undefined, { method: 'DELETE' })
+              try {
+                await gfetch(`/calendars/${encodeURIComponent(calId)}/events/${encodeURIComponent(externalId)}`,
+                  undefined, { method: 'DELETE' })
+              } catch (e: any) {
+                // If already gone (404/410), treat as success
+                if (!['404','410'].includes(e?.message)) throw e
+              }
             }
             results.push({ ok: true, action: 'delete', localId: i.local.id })
             continue
           }
 
+          // CREATE
           if (i.action === 'create') {
             const calId = (i.preferredTarget as any)?.calendarId || defaultCal
             const body = toGoogleResource(i.local)
@@ -289,20 +274,53 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
             continue
           }
 
+          // UPDATE (with fallback to CREATE)
           if (i.action === 'update') {
             const calId = i.target?.calendarId || defaultCal
             const externalId = i.target?.externalId
             const body = toGoogleResource(i.local)
-            const updated = await gfetch(`/calendars/${encodeURIComponent(calId)}/events/${encodeURIComponent(externalId!)}`,
-              undefined, { method: 'PATCH', body: JSON.stringify(body) }) as GoogleEvent
+
+            // If we somehow have no binding, treat as create
+            if (!externalId) {
+              const created = await gfetch(`/calendars/${encodeURIComponent(calId)}/events`,
+                undefined, { method: 'POST', body: JSON.stringify(body) }) as GoogleEvent
+              results.push({
+                ok: true, action: 'create', localId: i.local.id,
+                bound: { provider: 'google', calendarId: calId, externalId: created.id, etag: created.etag }
+              })
+              continue
+            }
+
+            // Try PATCH first
+            let updated: GoogleEvent | null = null
+            try {
+              updated = await gfetch(
+                `/calendars/${encodeURIComponent(calId)}/events/${encodeURIComponent(externalId)}`,
+                undefined, { method: 'PATCH', body: JSON.stringify(body) }
+              ) as GoogleEvent
+            } catch (e: any) {
+              const code = e?.message
+              // If the resource is gone/invalid/bad, fall back to create + rebind
+              if (['400', '404', '410'].includes(code)) {
+                const created = await gfetch(`/calendars/${encodeURIComponent(calId)}/events`,
+                  undefined, { method: 'POST', body: JSON.stringify(body) }) as GoogleEvent
+                results.push({
+                  ok: true, action: 'update', localId: i.local.id,
+                  bound: { provider: 'google', calendarId: calId, externalId: created.id, etag: created.etag }
+                })
+                continue
+              }
+              throw e
+            }
+
             results.push({
               ok: true, action: 'update', localId: i.local.id,
-              bound: { provider: 'google', calendarId: calId, externalId: updated.id, etag: updated.etag }
+              bound: { provider: 'google', calendarId: calId, externalId: updated!.id, etag: updated!.etag }
             })
             continue
           }
 
-          // Fallback
+          // Fallback (shouldn't happen)
           results.push({ ok: true, action: i.action, localId: i.local.id })
         } catch (e: any) {
           results.push({ ok: false, action: i.action, localId: i.local.id, error: e?.message || String(e) })
