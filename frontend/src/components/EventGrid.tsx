@@ -25,9 +25,7 @@ function useAgendaChangeTick() {
   const [tick, setTick] = useState(0)
   useEffect(() => {
     const bump = () => setTick(t => t + 1)
-    // emitted by local + shadow writes
     window.addEventListener('fc:events-changed', bump)
-    // storage sync across tabs
     window.addEventListener('storage', bump)
     return () => {
       window.removeEventListener('fc:events-changed', bump)
@@ -109,11 +107,7 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
           const todays = safeEvents.filter((ev) => {
             const iso = ev?.start
             if (!iso) return false
-            try {
-              return DateTime.fromISO(iso).hasSame(d, 'day')
-            } catch {
-              return false
-            }
+            try { return DateTime.fromISO(iso).hasSame(d, 'day') } catch { return false }
           })
           const allDay = todays.filter((ev) => ev.allDay)
           const timed  = todays.filter((ev) => !ev.allDay)
@@ -125,33 +119,35 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
                 <div className="day-date">{d.toFormat('d LLL')}</div>
               </div>
 
-              {/* All-day strip (above the time grid) */}
-              {allDay.length > 0 && (
-                <div className="allDayBar">
-                  {allDay.map((item) => (
-                    <button
-                      key={`${item.id}-${item.start}-ad`}
-                      type="button"
-                      className="pill pill-action"
-                      onClick={() => onEdit(item)}
-                      title={item.title}
-                    >
-                      <span className="pill-label">{item.title}</span>
-                      <span className="pill-x" aria-hidden>×</span>
-                    </button>
-                  ))}
-                </div>
-              )}
+              {/* Wrapper so all-day pills can overlay without pushing the grid */}
+              <div className="day-body">
+                {allDay.length > 0 && (
+                  <div className="allDayOverlay">
+                    {allDay.map((item) => (
+                      <button
+                        key={`${item.id}-${item.start}-ad`}
+                        type="button"
+                        className="pill pill-action"
+                        onClick={() => onEdit(item)}
+                        title={item.title}
+                      >
+                        <span className="pill-label">{item.title}</span>
+                        <span className="pill-x" aria-hidden>×</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
 
-              {/* Time grid for this day */}
-              <DayColumn
-                day={d}
-                hourHeight={hourHeight}
-                events={timed}
-                onEdit={onEdit}
-                onCommitChange={onMoveOrResize}
-                settings={settings}
-              />
+                {/* Time grid for this day */}
+                <DayColumn
+                  day={d}
+                  hourHeight={hourHeight}
+                  events={timed}
+                  onEdit={onEdit}
+                  onCommitChange={onMoveOrResize}
+                  settings={settings}
+                />
+              </div>
             </div>
           )
         })}
@@ -179,10 +175,10 @@ function DayColumn({
 }) {
   const [drag, setDrag] = useState<DragState>(null)
 
-
-const zone = settings.timezone || DateTime.local().zoneName
-const dayZ = day.setZone(zone)
-const dayStart = dayZ.startOf('day')
+  // Normalise *everything* to the app’s selected timezone
+  const zone = settings.timezone || DateTime.local().zoneName
+  const dayZ = day.setZone(zone)
+  const dayStart = dayZ.startOf('day')
 
   // click suppression for drags
   const dragMetaRef = useRef<{ key?: string; startY?: number; startX?: number; moved?: boolean }>({})
@@ -208,12 +204,11 @@ const dayStart = dayZ.startOf('day')
       else if (drag.type === 'resize') { e = e0.plus({ minutes: drag.deltaMin }); if (e <= s) e = s.plus({ minutes: SNAP_MINUTES }) }
     }
 
-    // Zone-normalised geometry so hour ticks and events always align
-
-const sZ = s.setZone(zone)
-const eZ = e.setZone(zone)
-const top = (sZ.diff(dayStart, 'minutes').minutes / 60) * hourHeight
-const height = Math.max(24, (eZ.diff(sZ, 'minutes').minutes / 60) * hourHeight)
+    // Geometry in the same zone as ticks/labels
+    const sZ = s.setZone(zone)
+    const eZ = e.setZone(zone)
+    const top = (sZ.diff(dayStart, 'minutes').minutes / 60) * hourHeight
+    const height = Math.max(24, (eZ.diff(sZ, 'minutes').minutes / 60) * hourHeight)
 
     const colour = pickEventColour({
       baseColour: ev.colour,
@@ -246,8 +241,8 @@ const height = Math.max(24, (eZ.diff(sZ, 'minutes').minutes / 60) * hourHeight)
             const origOcc = (ev as any)._origOccStart || (ev as any)._prevStart || ev.start
             onCommitChange({
               ...ev,
-              _prevStart: ev.start as any,          // for existing series/shadow handlers
-              _origOccStart: origOcc as any,        // stable across re-edits
+              _prevStart: ev.start as any,
+              _origOccStart: origOcc as any,
               start: s0.plus({ minutes: prev.deltaMin }).toISO()!,
               end: e0.plus({ minutes: prev.deltaMin }).toISO()!,
             } as any)
@@ -297,7 +292,7 @@ const height = Math.max(24, (eZ.diff(sZ, 'minutes').minutes / 60) * hourHeight)
 
     const handleClick = (e: React.MouseEvent) => {
       e.stopPropagation()
-      if (lastDraggedKeyRef.current === key) return // suppress click after drag
+      if (lastDraggedKeyRef.current === key) return
       onEdit(ev)
     }
 
