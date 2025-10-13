@@ -110,7 +110,7 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
               <div className="day-name">{d.toFormat('ccc')}</div>
               <div className="day-date">{d.toFormat('d LLL')}</div>
             </div>
-            {(() => {
+          
  {(() => {
   // Split today’s events into all-day vs timed (defensive parsing)
   const todays = safeEvents.filter((ev) => {
@@ -124,7 +124,7 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
   })
 
   const allDay = todays.filter((ev) => ev.allDay)
-  const timed  = todays.filter((ev) => !ev.allDay)
+  const timed = todays.filter((ev) => !ev.allDay)
 
   return (
     <>
