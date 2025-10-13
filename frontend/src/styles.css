@@ -476,3 +476,9 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .pill-action:hover{background:#eef2f7}
 .pill-action:focus{outline:2px solid #3b82f6;outline-offset:2px}
 .pill-x{opacity:.6}
+
+.day-body{position:relative}
+.allDayOverlay{
+  position:absolute; top:4px; left:8px; right:8px; z-index:3;
+  display:flex; flex-wrap:wrap; gap:6px; pointer-events:auto;
+}
