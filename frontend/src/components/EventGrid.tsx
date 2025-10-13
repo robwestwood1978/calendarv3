@@ -1,3 +1,4 @@
+// frontend/src/components/EventGrid.tsx
 import React, { useRef, useState, useMemo, useCallback, useEffect } from 'react'
 import { DateTime } from 'luxon'
 import { listExpanded } from '../state/events-agenda'
@@ -15,10 +16,6 @@ interface GridProps {
 
 const SNAP_MINUTES = 15
 const CLICK_DRAG_THRESHOLD_PX = 3
-
-function toast(msg: string) {
-  try { window.dispatchEvent(new CustomEvent('toast', { detail: msg })) } catch {}
-}
 
 /** subscribe to store changes so grids re-compute immediately after saves */
 function useAgendaChangeTick() {
@@ -120,22 +117,22 @@ export function TimeGrid({ view, cursor, query, onNewAt, onEdit, onMoveOrResize 
               </div>
 
               {/* Wrapper so all-day pills can overlay without pushing the grid */}
-              <div className="day-body">
+              <div className="day-body" style={{ position: 'relative' }}>
                 {allDay.length > 0 && (
-  <div className="allDayOverlay">
-    {allDay.map(item => (
-      <button
-        key={`${item.id}-${item.start}-ad`}
-        type="button"
-        className="pill"
-        onClick={() => onEdit(item)}
-        title={item.title}
-      >
-        {item.title}
-      </button>
-    ))}
-  </div>
-)}
+                  <div className="allDayOverlay">
+                    {allDay.map(item => (
+                      <button
+                        key={`${item.id}-${item.start}-ad`}
+                        type="button"
+                        className="pill"
+                        onClick={() => onEdit(item)}
+                        title={item.title}
+                      >
+                        {item.title}
+                      </button>
+                    ))}
+                  </div>
+                )}
 
                 {/* Time grid for this day */}
                 <DayColumn
