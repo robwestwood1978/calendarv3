@@ -1,9 +1,8 @@
 // frontend/src/components/SettingsPage.tsx
-// Adds a visible Developer Trace toggle in the Google Calendar card.
+// Restored Baseline-D Settings UI with proper pill chips for Tags & What to Bring.
 
-import React, { useMemo, useState, useEffect } from 'react'
+import React, { useMemo, useState } from 'react'
 import { useSettings, Member, MemberRole } from '../state/settings'
-import { isTraceEnabled, setTraceEnabled, runManualSync } from '../sync/bootstrap'
 
 const ROLES: MemberRole[] = ['parent', 'adult', 'child'] as const
 
@@ -17,10 +16,6 @@ export default function SettingsPage() {
   // Inputs for tags & bring presets
   const [tagInput, setTagInput] = useState('')
   const [bringInput, setBringInput] = useState('')
-
-  // Trace toggle (persisted by bootstrap helpers)
-  const [traceOn, setTraceOn] = useState<boolean>(isTraceEnabled())
-  useEffect(() => setTraceOn(isTraceEnabled()), []) // refresh on mount
 
   const tzOptions = useMemo(() => {
     try {
@@ -52,7 +47,7 @@ export default function SettingsPage() {
     cancelEdit()
   }
 
-  // Use current state API
+  // Tags / Bring
   function addTag() {
     const v = tagInput.trim()
     if (!v) return
@@ -65,28 +60,25 @@ export default function SettingsPage() {
     s.addBring(v)
     setBringInput('')
   }
-  function removeTag(v: string) { s.removeTag(v) }
-  function removeBring(v: string) { s.removeBring(v) }
-
-  // UI helper
-  const Toggle = ({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) => (
-    <button
-      type="button"
-      onClick={() => onChange(!checked)}
-      aria-pressed={checked}
-      className="btn btn-small"
-      style={{
-        borderColor: checked ? '#2563eb' : 'var(--border)',
-        background: checked ? '#2563eb' : '#fff',
-        color: checked ? '#fff' : 'var(--text)',
-      }}
-    >
-      {checked ? 'On' : 'Off'}
-    </button>
-  )
 
   return (
     <div className="settings-page">
+      {/* Google section (kept minimal; your existing toggle/buttons live elsewhere) */}
+      <div className="card">
+        <h3>Google Calendar</h3>
+        <p style={{ marginTop: 0 }}>
+          Status: <strong>{s?.integrations?.google?.connected ? 'Connected' : 'Not connected'}</strong>
+        </p>
+        <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <input
+            type="checkbox"
+            checked={!!s?.integrations?.google?.trace}
+            onChange={e => s.setIntegrationTrace?.('google', e.target.checked)}
+          />
+          <span>Developer trace</span>
+        </label>
+      </div>
+
       {/* Appearance */}
       <div className="card">
         <h3>Appearance</h3>
@@ -184,40 +176,6 @@ export default function SettingsPage() {
         </div>
       </div>
 
-      {/* Google Calendar + dev trace toggle */}
-      <div className="card">
-        <h3>Google Calendar</h3>
-        <div className="row between">
-          <div>
-            <div style={{ fontWeight: 600 }}>Status:</div>
-            <div>
-              {/* Keep your existing connection state text; you can replace this with your real binding */}
-              Connected
-            </div>
-            <div className="hint">Uses your Google account to read events within your sync window. You can revoke access any time.</div>
-          </div>
-          <div className="row" style={{ gap: 8 }}>
-            <button className="btn" onClick={() => runManualSync()}>↻ Sync now</button>
-          </div>
-        </div>
-
-        <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
-          <div className="row between">
-            <div>
-              <div style={{ fontWeight: 600 }}>Developer trace</div>
-              <div className="hint">Writes extra console output and emits fc:sync-trace events to help debug sync.</div>
-            </div>
-            <Toggle
-              checked={traceOn}
-              onChange={(v) => {
-                setTraceOn(v)
-                setTraceEnabled(v)
-              }}
-            />
-          </div>
-        </div>
-      </div>
-
       {/* Tags & What to Bring */}
       <div className="card">
         <h3>Tags &amp; What to Bring</h3>
@@ -225,9 +183,16 @@ export default function SettingsPage() {
           {/* Tags */}
           <div>
             <h4>Common Tags</h4>
-            <div className="row-wrap">
-              {(s.tags || []).map(t => (
-                <span key={t} className="pill" onClick={() => removeTag(t)}>{t} ×</span>
+            <div className="chips" style={{ marginTop: 6 }}>
+              {(s.tags || []).map(tag => (
+                <span key={tag} className="pill" role="listitem" aria-label={`Tag ${tag}`}>
+                  <span className="pill-label">{tag}</span>
+                  <button
+                    className="pill-xbtn"
+                    aria-label={`Remove ${tag}`}
+                    onClick={() => s.removeTag(tag)}
+                  >×</button>
+                </span>
               ))}
             </div>
             <div className="row" style={{ marginTop: 8 }}>
@@ -244,9 +209,16 @@ export default function SettingsPage() {
           {/* Bring presets */}
           <div>
             <h4>What to Bring</h4>
-            <div className="row-wrap">
-              {(s.bringPresets || []).map(t => (
-                <span key={t} className="pill" onClick={() => removeBring(t)}>{t} ×</span>
+            <div className="chips" style={{ marginTop: 6 }}>
+              {(s.bringPresets || []).map(item => (
+                <span key={item} className="pill" role="listitem" aria-label={`Item ${item}`}>
+                  <span className="pill-label">{item}</span>
+                  <button
+                    className="pill-xbtn"
+                    aria-label={`Remove ${item}`}
+                    onClick={() => s.removeBring(item)}
+                  >×</button>
+                </span>
               ))}
             </div>
             <div className="row" style={{ marginTop: 8 }}>
