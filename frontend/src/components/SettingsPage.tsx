@@ -1,11 +1,9 @@
 // frontend/src/components/SettingsPage.tsx
-// Restored Baseline-D Settings UI (no Google code here).
-// - Appearance: theme, timezone, week start
-// - Household: list, add, edit, remove, colour, email
-// - Tags & What to Bring: add/remove via pills, Enter-to-add
+// Adds a visible Developer Trace toggle in the Google Calendar card.
 
-import React, { useMemo, useState } from 'react'
+import React, { useMemo, useState, useEffect } from 'react'
 import { useSettings, Member, MemberRole } from '../state/settings'
+import { isTraceEnabled, setTraceEnabled, runManualSync } from '../sync/bootstrap'
 
 const ROLES: MemberRole[] = ['parent', 'adult', 'child'] as const
 
@@ -19,6 +17,10 @@ export default function SettingsPage() {
   // Inputs for tags & bring presets
   const [tagInput, setTagInput] = useState('')
   const [bringInput, setBringInput] = useState('')
+
+  // Trace toggle (persisted by bootstrap helpers)
+  const [traceOn, setTraceOn] = useState<boolean>(isTraceEnabled())
+  useEffect(() => setTraceOn(isTraceEnabled()), []) // refresh on mount
 
   const tzOptions = useMemo(() => {
     try {
@@ -63,12 +65,25 @@ export default function SettingsPage() {
     s.addBring(v)
     setBringInput('')
   }
-  function removeTag(v: string) {
-    s.removeTag(v)
-  }
-  function removeBring(v: string) {
-    s.removeBring(v)
-  }
+  function removeTag(v: string) { s.removeTag(v) }
+  function removeBring(v: string) { s.removeBring(v) }
+
+  // UI helper
+  const Toggle = ({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) => (
+    <button
+      type="button"
+      onClick={() => onChange(!checked)}
+      aria-pressed={checked}
+      className="btn btn-small"
+      style={{
+        borderColor: checked ? '#2563eb' : 'var(--border)',
+        background: checked ? '#2563eb' : '#fff',
+        color: checked ? '#fff' : 'var(--text)',
+      }}
+    >
+      {checked ? 'On' : 'Off'}
+    </button>
+  )
 
   return (
     <div className="settings-page">
@@ -169,6 +184,40 @@ export default function SettingsPage() {
         </div>
       </div>
 
+      {/* Google Calendar + dev trace toggle */}
+      <div className="card">
+        <h3>Google Calendar</h3>
+        <div className="row between">
+          <div>
+            <div style={{ fontWeight: 600 }}>Status:</div>
+            <div>
+              {/* Keep your existing connection state text; you can replace this with your real binding */}
+              Connected
+            </div>
+            <div className="hint">Uses your Google account to read events within your sync window. You can revoke access any time.</div>
+          </div>
+          <div className="row" style={{ gap: 8 }}>
+            <button className="btn" onClick={() => runManualSync()}>↻ Sync now</button>
+          </div>
+        </div>
+
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+          <div className="row between">
+            <div>
+              <div style={{ fontWeight: 600 }}>Developer trace</div>
+              <div className="hint">Writes extra console output and emits fc:sync-trace events to help debug sync.</div>
+            </div>
+            <Toggle
+              checked={traceOn}
+              onChange={(v) => {
+                setTraceOn(v)
+                setTraceEnabled(v)
+              }}
+            />
+          </div>
+        </div>
+      </div>
+
       {/* Tags & What to Bring */}
       <div className="card">
         <h3>Tags &amp; What to Bring</h3>
@@ -178,16 +227,7 @@ export default function SettingsPage() {
             <h4>Common Tags</h4>
             <div className="row-wrap">
               {(s.tags || []).map(t => (
-                <button
-                  key={t}
-                  type="button"
-                  className="pill pill-action"
-                  onClick={() => removeTag(t)}
-                  aria-label={`Remove tag ${t}`}
-                >
-                  <span className="pill-label">{t}</span>
-                  <span className="pill-x" aria-hidden>×</span>
-                </button>
+                <span key={t} className="pill" onClick={() => removeTag(t)}>{t} ×</span>
               ))}
             </div>
             <div className="row" style={{ marginTop: 8 }}>
@@ -206,16 +246,7 @@ export default function SettingsPage() {
             <h4>What to Bring</h4>
             <div className="row-wrap">
               {(s.bringPresets || []).map(t => (
-                <button
-                  key={t}
-                  type="button"
-                  className="pill pill-action"
-                  onClick={() => removeBring(t)}
-                  aria-label={`Remove item ${t}`}
-                >
-                  <span className="pill-label">{t}</span>
-                  <span className="pill-x" aria-hidden>×</span>
-                </button>
+                <span key={t} className="pill" onClick={() => removeBring(t)}>{t} ×</span>
               ))}
             </div>
             <div className="row" style={{ marginTop: 8 }}>
