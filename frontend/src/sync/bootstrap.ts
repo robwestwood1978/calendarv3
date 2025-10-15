@@ -1,91 +1,51 @@
 // frontend/src/sync/bootstrap.ts
-// Sync bootstrap + developer trace toggle (safe mode)
+// 30s polling + visibility-triggered pulls. Small, safe wrapper around core.
 
 import { readSyncConfig } from './core'
+import { runSyncOnce } from './core' // core should already expose this in your repo
 
-// ---- Developer trace toggle (simple localStorage flag) ----
-const TRACE_KEY = 'fc_sync_trace_v1'
-
-export function isTraceEnabled(): boolean {
-  try { return localStorage.getItem(TRACE_KEY) === '1' } catch { return false }
-}
-
-export function setTraceEnabled(on: boolean) {
-  try {
-    if (on) localStorage.setItem(TRACE_KEY, '1')
-    else localStorage.removeItem(TRACE_KEY)
-    // Bubble a small toast if the host listens for it
-    try {
-      const msg = on ? 'Developer trace: ON' : 'Developer trace: OFF'
-      window.dispatchEvent(new CustomEvent('toast', { detail: msg }))
-    } catch {}
-  } catch {}
-}
-
-function tlog(...args: any[]) {
-  if (!isTraceEnabled()) return
-  // Console + custom event hook (for any side panel loggers)
-  // Keep it super safe—never throw from here.
-  try { console.debug('[sync]', ...args) } catch {}
-  try { window.dispatchEvent(new CustomEvent('fc:sync-trace', { detail: args })) } catch {}
-}
-
-// ---- Simple guard so we don’t start two intervals
-let started = false
 let timer: number | null = null
+const INTERVAL_MS = 30_000
 
-// Public getter so UI can show “last sync”
-let _lastSyncISO: string | null = null
-export function getLastSyncISO() { return _lastSyncISO }
-
-// One-shot sync runner. This deliberately keeps behaviour minimal/safe.
-// Your actual provider work happens elsewhere (pull happens on a timer,
-// push happens on-save from your agenda code).
-export async function maybeRunSync() {
+export function maybeRunSync() {
   try {
     const cfg = readSyncConfig()
-    if (!cfg?.enabled) {
-      tlog('skip: sync disabled')
-      return
-    }
-    tlog('sync tick: windowWeeks=%o providers=%o', cfg.windowWeeks, Object.keys(cfg.providers || {}))
-    // The project’s Slice-D design does pull on timer and push on save.
-    // If you later add an explicit pull call here, keep it try/catch:
-    _lastSyncISO = new Date().toISOString()
-    // Emit a gentle “changed” pulse so UI can react
-    try { window.dispatchEvent(new Event('fc:events-changed')) } catch {}
+    if (!cfg?.enabled) return
+    // Only run if at least one provider is on
+    const anyOn = !!(
+      cfg.providers?.google?.enabled ||
+      cfg.providers?.apple?.enabled
+    )
+    if (!anyOn) return
+    runSyncOnce().catch((err: any) => {
+      console.warn('[sync] run failed:', err)
+      // Surface a tiny toast so you notice if it keeps failing
+      try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Sync failed (see console)' })) } catch {}
+    })
   } catch (e) {
-    tlog('sync tick failed:', e)
+    console.warn('[sync] maybeRunSync error:', e)
   }
 }
 
-export function startSyncLoop(intervalMs = 5 * 60 * 1000) {
-  if (started) return
-  started = true
-
-  // Run at tab visibility changes too—cheap and keeps things feeling “fresh”
-  const onVisible = () => {
-    try {
-      if (document.visibilityState === 'visible') maybeRunSync()
-    } catch {}
+export function startSyncLoop() {
+  // Clear old timers (hot reload / double calls safe)
+  if (timer) {
+    clearInterval(timer)
+    timer = null
   }
-  try { document.addEventListener('visibilitychange', onVisible) } catch {}
 
-  // Kick once now…
-  maybeRunSync()
-
-  // …then every N minutes
+  // Regular background tick
   timer = window.setInterval(() => {
     maybeRunSync()
-  }, intervalMs) as unknown as number
+  }, INTERVAL_MS)
 
-  tlog('sync loop started (every %sms)', intervalMs)
-}
+  // Pull immediately when you foreground the tab/app
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      maybeRunSync()
+    }
+  })
 
-// Optional: allows the Calendar toolbar to trigger a manual tick.
-// Safe no-op if sync is disabled.
-export async function runManualSync() {
-  tlog('manual sync requested')
-  await maybeRunSync()
-  try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Sync complete.' })) } catch {}
+  // First kick (don’t wait 30s on startup)
+  queueMicrotask(() => maybeRunSync())
 }
