@@ -1,8 +1,7 @@
 // frontend/src/sync/bootstrap.ts
 // Safe sync bootstrap: periodic pull + manual trigger; no external "e.now" usage.
 
-import { readSyncConfig } from './core'
-import { runSyncOnce } from './runner'  // your existing single-shot sync executor
+import { readSyncConfig, runSyncOnce } from './core'
 
 const TICK_MS = 30_000
 
@@ -21,10 +20,10 @@ async function tick(label: string) {
     const cfg = readSyncConfig()
     if (!cfg?.enabled) return
 
-    // defensive: only pass configured providers
+    // Single-shot sync; core handles providers + tokens.
     await runSyncOnce({ cfg })
   } catch (err) {
-    // swallow — runner already logs; avoid breaking the loop
+    // Keep the loop alive; core/adapter code should already log details.
     try { console.warn('[sync] run failed:', err) } catch {}
   } finally {
     running = false
@@ -33,30 +32,29 @@ async function tick(label: string) {
   }
 }
 
+/** Kick a one-off sync if enabled. */
 export function maybeRunSync() {
-  // If sync is enabled and we haven’t started yet, run once immediately.
   const cfg = readSyncConfig()
   if (!cfg?.enabled) return
   void tick('bootstrap')
 }
 
+/** Start the periodic loop; idempotent. */
 export function startSyncLoop() {
   const cfg = readSyncConfig()
   if (!cfg?.enabled) {
-    // ensure any previous loop is stopped
     if (intervalId != null) { clearInterval(intervalId); intervalId = null }
     return
   }
 
   if (intervalId != null) return // already running
 
-  intervalId = window.setInterval(() => {
-    void tick('interval')
-  }, TICK_MS)
+  intervalId = window.setInterval(() => { void tick('interval') }, TICK_MS)
 
-  // Manual trigger (e.g. after resetting token)
-  window.addEventListener('fc:sync-now', () => void tick('manual'))
-  // Visibility wake-up (optional)
+  // Manual trigger (e.g. after resetting tokens from Settings)
+  window.addEventListener('fc:sync-now', () => { void tick('manual') })
+
+  // Wake sync when tab becomes visible again
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') void tick('visible')
   })
