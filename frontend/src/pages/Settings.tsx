@@ -1,158 +1,259 @@
-// frontend/src/pages/Settings.tsx
-// Baseline D Settings: restored + Google Calendar connection added cleanly.
-// - Keeps your original SettingsPage content and visual style.
-// - Preserves Experiments + AccountPanel exactly as before.
-// - Renders IntegrationsPanel (unchanged) and adds a matching Google section beneath it.
-// - Google section is feature-flagged: featureFlags.google === true.
+import React from 'react'
+import { Link } from 'react-router-dom'
 
-import React, { useEffect, useState } from 'react'
-import SettingsPage from '../components/SettingsPage'
-import { featureFlags } from '../state/featureFlags'
-import { useAuth } from '../auth/AuthProvider'
-import { useSettings } from '../state/settings'
+/** ===== Sync config (window state) ===== */
+import { readSyncConfig, writeSyncConfig } from '../sync/core'
+import { maybeRunSync, startSyncLoop } from '../sync/bootstrap'
 
-// Existing Slice D panel (unchanged)
-import IntegrationsPanel from '../components/integrations/IntegrationsPanel'
-
-// NEW: Google connect card
-import GoogleConnectCard from '../components/integrations/GoogleConnectCard'
-
-type Flags = ReturnType<typeof featureFlags.get>
-
-export default function Settings() {
-  const [flags, setFlags] = useState<Flags>(() => featureFlags.get())
-  useEffect(() => {
-    const unsub = featureFlags.subscribe(() => setFlags(featureFlags.get()))
-    return () => unsub()
-  }, [])
-
-  function onToggleAuth(e: React.ChangeEvent<HTMLInputElement>) {
-    const on = e.currentTarget.checked
-    featureFlags.set({ authEnabled: on })
-    setTimeout(() => window.location.reload(), 0)
-  }
-
-  return (
-    <div style={{ display: 'grid', gap: 16 }}>
-      {/* Baseline A/B Settings UI (unchanged, full household/appearance/tags UX) */}
-      <SettingsPage />
-
-      {/* Experiments (unchanged) */}
-      <section style={card}>
-        <h3 style={h3}>Experiments</h3>
-        <label style={row}>
-          <input
-            type="checkbox"
-            checked={!!flags.authEnabled}
-            onChange={onToggleAuth}
-          />
-          <span>Enable accounts (sign-in)</span>
-        </label>
-        <p style={hint}>When disabled, the app behaves exactly like Slice A/B.</p>
-      </section>
-
-      {/* Account (unchanged) */}
-      {flags.authEnabled && <AccountPanel />}
-
-      {/* Integrations (existing panel, unchanged) */}
-      <IntegrationsPanel />
-
-      {/* NEW: Google Calendar section — visually identical card, minimal & additive */}
-      {flags.google && (
-        <section style={card}>
-          <h3 style={h3}>Google Calendar</h3>
-          <p style={hint}>
-            Connect your Google account to pull events into the Family Calendar.
-            You can disconnect at any time.
-          </p>
-          <div style={{ marginTop: 8 }}>
-            <GoogleConnectCard />
-          </div>
-        </section>
-      )}
-    </div>
-  )
+/** Small helpers so we don’t pull extra deps */
+const get = (k: string) => {
+  try { return localStorage.getItem(k) } catch { return null }
+}
+const set = (k: string, v: string) => {
+  try { localStorage.setItem(k, v) } catch {}
+}
+const rm = (k: string) => {
+  try { localStorage.removeItem(k) } catch {}
 }
 
-function AccountPanel() {
-  const { currentUser, linkMember, unlinkMember } = useAuth()
-  const s = useSettings()
-  const members = Array.isArray((s as any).members) ? (s as any).members : []
+/** Heuristic “connected to Google?” indicator.
+ *  Your OAuth layer already stores fc_google_oauth_v1; this avoids importing internal auth code. */
+function useGoogleConnected(): boolean {
+  const [ok, setOk] = React.useState<boolean>(() => !!get('fc_google_oauth_v1'))
+  React.useEffect(() => {
+    const i = setInterval(() => setOk(!!get('fc_google_oauth_v1')), 750)
+    return () => clearInterval(i)
+  }, [])
+  return ok
+}
 
+function Section({ title, children }: { title: string, children: React.ReactNode }) {
   return (
-    <section style={card}>
-      <h3 style={h3}>Account</h3>
-
-      {!currentUser ? (
-        <>
-          <p style={hint}>Not signed in. Use the button in the top-right to sign in with a seed account.</p>
-          <p style={hint}>
-            Seed users: <code>parent@local.test</code> / <code>parent123</code>,
-            <code> adult@local.test</code> / <code>adult123</code>,
-            <code> child@local.test</code> / <code>child123</code>.
-          </p>
-        </>
-      ) : (
-        <>
-          <div style={box}>
-            <div><strong>{currentUser.email}</strong></div>
-            <div>Role: {currentUser.role}</div>
-          </div>
-
-          <div style={{ ...box, marginTop: 12 }}>
-            <div style={{ marginBottom: 8, fontWeight: 600 }}>Link my members</div>
-            {members.length === 0 && <div style={hint}>No members yet. Add members in Settings above.</div>}
-            <div style={{ display: 'grid', gap: 6 }}>
-              {members.map((m: any) => {
-                const linked = currentUser.linkedMemberIds.includes(m.id)
-                return (
-                  <label key={m.id} style={row}>
-                    <input
-                      type="checkbox"
-                      checked={linked}
-                      onChange={(e) => e.currentTarget.checked ? linkMember(m.id) : unlinkMember(m.id)}
-                    />
-                    <span>{m.name}</span>
-                  </label>
-                )
-              })}
-            </div>
-          </div>
-        </>
-      )}
+    <section className="card">
+      <h2 style={{ margin: 0, marginBottom: '0.75rem' }}>{title}</h2>
+      {children}
     </section>
   )
 }
 
-/* ---------------- styles (match your baseline) ---------------- */
+/* ---------------- Google (single tile) ---------------- */
 
-const card: React.CSSProperties = {
-  background: '#fff',
-  border: '1px solid #e5e7eb',
-  borderRadius: 8,
-  padding: 16,
+function GoogleCard() {
+  const connected = useGoogleConnected()
+  const [trace, setTrace] = React.useState<boolean>(() => get('fc_sync_trace_v1') === '1')
+  const cfg = React.useMemo(() => readSyncConfig(), [])
+  const googleEnabled = !!cfg.enabled && !!cfg.providers?.google?.enabled
+
+  const enableSync = () => {
+    const curr = readSyncConfig()
+    const next = {
+      ...curr,
+      enabled: true,
+      windowWeeks: curr.windowWeeks || 8,
+      providers: {
+        ...(curr.providers || {}),
+        google: {
+          enabled: true,
+          accountKey: curr.providers?.google?.accountKey,
+          calendars: curr.providers?.google?.calendars || [], // will be “primary” by adapter default
+        },
+        apple: {
+          enabled: curr.providers?.apple?.enabled || false,
+          accountKey: curr.providers?.apple?.accountKey,
+          calendars: curr.providers?.apple?.calendars || [],
+        },
+      },
+    }
+    writeSyncConfig(next)
+    try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Cloud sync enabled (Google).' })) } catch {}
+    maybeRunSync()
+    startSyncLoop()
+  }
+
+  const disableSync = () => {
+    const curr = readSyncConfig()
+    writeSyncConfig({ ...curr, enabled: false })
+    try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Cloud sync disabled.' })) } catch {}
+  }
+
+  const toggleTrace = (on: boolean) => {
+    set('fc_sync_trace_v1', on ? '1' : '0')
+    setTrace(on)
+    try { window.dispatchEvent(new CustomEvent('toast', { detail: `Developer trace ${on ? 'on' : 'off'}.` })) } catch {}
+  }
+
+  const resetSyncToken = () => {
+    rm('fc_google_sync_token_v1')
+    try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Google sync token cleared.' })) } catch {}
+    // Nudge the loop
+    try { window.dispatchEvent(new Event('fc:sync-now')) } catch {}
+  }
+
+  return (
+    <div className="card">
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+        <div>
+          <div style={{ fontSize: 18, fontWeight: 700 }}>Google Calendar</div>
+          <div style={{ marginTop: 4, color: 'var(--muted)' }}>
+            Status: <strong>{connected ? 'Connected' : 'Not connected'}</strong>
+          </div>
+          <div style={{ marginTop: 8, color: 'var(--muted)' }}>
+            Uses your Google account to read events within your sync window. You can revoke access any time from Google’s
+            <span> </span>
+            <a href="https://myaccount.google.com/permissions" target="_blank" rel="noreferrer">App access</a>.
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {!googleEnabled
+            ? <button className="primary" onClick={enableSync} disabled={!connected}>Enable Sync</button>
+            : <button onClick={disableSync}>Disable Sync</button>
+          }
+        </div>
+      </div>
+
+      <hr style={{ border: 0, borderTop: '1px solid var(--border)', margin: '12px 0' }} />
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={trace}
+            onChange={e => toggleTrace(e.currentTarget.checked)}
+          />
+          <span>Developer trace</span>
+        </label>
+
+        <button onClick={resetSyncToken} title="Clear incremental token and force a fresh window pull">
+          Reset Google sync
+        </button>
+      </div>
+    </div>
+  )
 }
 
-const h3: React.CSSProperties = {
-  margin: '0 0 8px 0',
-  fontSize: 18,
+/* ---------------- Tags & What to bring ---------------- */
+
+function Pill({
+  label,
+  onRemove,
+}: {
+  label: string
+  onRemove: () => void
+}) {
+  return (
+    <span className="chip" style={{ userSelect: 'none' }}>
+      {label}
+      <button
+        type="button"
+        className="chip-x"
+        aria-label={`Remove ${label}`}
+        onClick={onRemove}
+        title="Remove"
+      >
+        ×
+      </button>
+    </span>
+  )
 }
 
-const row: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 8,
+function TagsCard() {
+  // store keys match what you had before
+  const [tags, setTags] = React.useState<string[]>(
+    () => JSON.parse(get('fc_common_tags_v1') || '[]')
+  )
+  const [bring, setBring] = React.useState<string[]>(
+    () => JSON.parse(get('fc_common_bring_v1') || '[]')
+  )
+  const [newTag, setNewTag] = React.useState('')
+  const [newItem, setNewItem] = React.useState('')
+
+  const persist = (k: 'tags' | 'bring', v: string[]) => {
+    if (k === 'tags') { set('fc_common_tags_v1', JSON.stringify(v)); setTags(v) }
+    else { set('fc_common_bring_v1', JSON.stringify(v)); setBring(v) }
+  }
+
+  return (
+    <div className="card">
+      <h2 style={{ marginTop: 0 }}>Tags & What to Bring</h2>
+
+      <div style={{ marginBottom: 10, fontWeight: 600 }}>Common Tags</div>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+        {tags.map((t, i) => (
+          <Pill key={`${t}-${i}`} label={t} onRemove={() => persist('tags', tags.filter(x => x !== t))} />
+        ))}
+      </div>
+      <div className="row gap" style={{ marginBottom: 16 }}>
+        <input
+          placeholder="Add tag"
+          value={newTag}
+          onChange={e => setNewTag(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter' && newTag.trim()) { persist('tags', Array.from(new Set([...tags, newTag.trim()]))); setNewTag('') } }}
+        />
+        <button onClick={() => { if (newTag.trim()) { persist('tags', Array.from(new Set([...tags, newTag.trim()]))); setNewTag('') } }}>
+          Add
+        </button>
+      </div>
+
+      <div style={{ marginBottom: 10, fontWeight: 600 }}>Common “What to bring”</div>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+        {bring.map((t, i) => (
+          <Pill key={`${t}-${i}`} label={t} onRemove={() => persist('bring', bring.filter(x => x !== t))} />
+        ))}
+      </div>
+      <div className="row gap">
+        <input
+          placeholder="Add item"
+          value={newItem}
+          onChange={e => setNewItem(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter' && newItem.trim()) { persist('bring', Array.from(new Set([...bring, newItem.trim()]))); setNewItem('') } }}
+        />
+        <button onClick={() => { if (newItem.trim()) { persist('bring', Array.from(new Set([...bring, newItem.trim()]))); setNewItem('') } }}>
+          Add
+        </button>
+      </div>
+    </div>
+  )
 }
 
-const box: React.CSSProperties = {
-  background: '#f8fafc',
-  border: '1px solid #e5e7eb',
-  borderRadius: 8,
-  padding: 12,
+/* ---------------- Experiments (kept minimal) ---------------- */
+
+function ExperimentsCard() {
+  const [accounts, setAccounts] = React.useState<boolean>(() => get('fc_flag_accounts_v1') === '1')
+  const toggle = (on: boolean) => { set('fc_flag_accounts_v1', on ? '1' : '0'); setAccounts(on) }
+
+  return (
+    <div className="card">
+      <h2 style={{ marginTop: 0 }}>Experiments</h2>
+      <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+        <input type="checkbox" checked={accounts} onChange={e => toggle(e.currentTarget.checked)} />
+        <span>Enable accounts (sign-in)</span>
+      </label>
+      <div className="hint">When disabled, the app behaves exactly like Slice A/B.</div>
+    </div>
+  )
 }
 
-const hint: React.CSSProperties = {
-  color: '#64748b',
-  fontSize: 12,
-  margin: '6px 0 0 0',
+/* ---------------- Page ---------------- */
+
+export default function Settings() {
+  return (
+    <div className="admin">
+      {/* SINGLE Google tile — the old/legacy Google card should be removed from your project so you don’t render it twice */}
+      <GoogleCard />
+
+      <TagsCard />
+
+      <ExperimentsCard />
+
+      <div className="card">
+        <h2 style={{ marginTop: 0 }}>Help</h2>
+        <div className="hint">
+          Tip: If Google pull ever shows “syncTokenWithNonDefaultOrdering / 400”, click <em>Reset Google sync</em> above
+          to clear the token, then wait a few seconds. You can also force a pull by reloading the page or clicking the
+          <Link to="/calendar"> calendar</Link> tab again.
+        </div>
+      </div>
+    </div>
+  )
 }
