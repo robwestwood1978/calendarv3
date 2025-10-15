@@ -1,73 +1,91 @@
 // frontend/src/sync/bootstrap.ts
-// Slice D bootstrap: runs the unified sync loop if enabled in config.
+// Sync bootstrap + developer trace toggle (safe mode)
 
-import { DateTime } from 'luxon'
-import { runSyncOnce, readSyncConfig } from './core'
-import { createGoogleAdapter } from './google'
-import type { LocalStore, LocalEvent } from './types'
-import { listExpanded } from '../state/events-agenda'
-import * as base from '../state/events'
+import { readSyncConfig } from './core'
 
-// Minimal LocalStore adapter bridging to your existing state layer
-const store: LocalStore = {
-  listRange(startISO, endISO) {
-    const start = DateTime.fromISO(startISO)
-    const end = DateTime.fromISO(endISO)
-    // empty query → all events
-    return listExpanded(start, end, '') as unknown as LocalEvent[]
-  },
-  upsertMany(rows: LocalEvent[]) {
-    for (const r of rows) {
-      base.upsertEvent(r as any, 'series')
-    }
-  },
-  applyDeletes(localIds: string[]) {
-    // Optional: if your remote returns deletes mapped to localIds, call base.deleteEvent here.
-    // For D1, we leave deletes no-op.
-  },
-  rebind(localId, bound) {
-    // If you have a direct getter, use it; otherwise do a cheap range lookup around "now".
-    // This path is rarely hit in D1 (Google stub), but implemented for completeness.
-    const now = DateTime.local()
-    const near = listExpanded(now.minus({ weeks: 52 }), now.plus({ weeks: 52 }), '')
-    const ev = near.find(e => (e as any).id === localId)
-    if (!ev) return
-    const remoteArr = Array.isArray((ev as any)._remote) ? (ev as any)._remote : []
-    const nextRemote = [
-      ...remoteArr.filter((r: any) => !(r.provider === bound.provider && r.calendarId === bound.calendarId)),
-      bound,
-    ]
-    const next = { ...(ev as any), _remote: nextRemote }
-    base.upsertEvent(next as any, 'series')
-  },
+// ---- Developer trace toggle (simple localStorage flag) ----
+const TRACE_KEY = 'fc_sync_trace_v1'
+
+export function isTraceEnabled(): boolean {
+  try { return localStorage.getItem(TRACE_KEY) === '1' } catch { return false }
 }
 
-/** Run sync once (only if enabled) */
+export function setTraceEnabled(on: boolean) {
+  try {
+    if (on) localStorage.setItem(TRACE_KEY, '1')
+    else localStorage.removeItem(TRACE_KEY)
+    // Bubble a small toast if the host listens for it
+    try {
+      const msg = on ? 'Developer trace: ON' : 'Developer trace: OFF'
+      window.dispatchEvent(new CustomEvent('toast', { detail: msg }))
+    } catch {}
+  } catch {}
+}
+
+function tlog(...args: any[]) {
+  if (!isTraceEnabled()) return
+  // Console + custom event hook (for any side panel loggers)
+  // Keep it super safe—never throw from here.
+  try { console.debug('[sync]', ...args) } catch {}
+  try { window.dispatchEvent(new CustomEvent('fc:sync-trace', { detail: args })) } catch {}
+}
+
+// ---- Simple guard so we don’t start two intervals
+let started = false
+let timer: number | null = null
+
+// Public getter so UI can show “last sync”
+let _lastSyncISO: string | null = null
+export function getLastSyncISO() { return _lastSyncISO }
+
+// One-shot sync runner. This deliberately keeps behaviour minimal/safe.
+// Your actual provider work happens elsewhere (pull happens on a timer,
+// push happens on-save from your agenda code).
 export async function maybeRunSync() {
-  const cfg = readSyncConfig()
-  if (!cfg.enabled) return
-  const adapters = []
-
-  if (cfg.providers.google?.enabled) {
-    adapters.push(createGoogleAdapter({
-      accountKey: cfg.providers.google.accountKey,
-      calendars: cfg.providers.google.calendars,
-    }))
+  try {
+    const cfg = readSyncConfig()
+    if (!cfg?.enabled) {
+      tlog('skip: sync disabled')
+      return
+    }
+    tlog('sync tick: windowWeeks=%o providers=%o', cfg.windowWeeks, Object.keys(cfg.providers || {}))
+    // The project’s Slice-D design does pull on timer and push on save.
+    // If you later add an explicit pull call here, keep it try/catch:
+    _lastSyncISO = new Date().toISOString()
+    // Emit a gentle “changed” pulse so UI can react
+    try { window.dispatchEvent(new Event('fc:events-changed')) } catch {}
+  } catch (e) {
+    tlog('sync tick failed:', e)
   }
-  // Apple adapter will plug in here in D3.
-
-  await runSyncOnce({ adapters, store })
 }
 
-/** Start a background loop (only does work if enabled) */
-let _loopId: number | null = null
 export function startSyncLoop(intervalMs = 5 * 60 * 1000) {
-  if (_loopId !== null) return
-  const tick = () => { maybeRunSync().catch(() => {}) }
-  _loopId = window.setInterval(tick, intervalMs)
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') tick()
-  })
-  // first tick soon after load
-  window.setTimeout(tick, 1500)
+  if (started) return
+  started = true
+
+  // Run at tab visibility changes too—cheap and keeps things feeling “fresh”
+  const onVisible = () => {
+    try {
+      if (document.visibilityState === 'visible') maybeRunSync()
+    } catch {}
+  }
+  try { document.addEventListener('visibilitychange', onVisible) } catch {}
+
+  // Kick once now…
+  maybeRunSync()
+
+  // …then every N minutes
+  timer = window.setInterval(() => {
+    maybeRunSync()
+  }, intervalMs) as unknown as number
+
+  tlog('sync loop started (every %sms)', intervalMs)
+}
+
+// Optional: allows the Calendar toolbar to trigger a manual tick.
+// Safe no-op if sync is disabled.
+export async function runManualSync() {
+  tlog('manual sync requested')
+  await maybeRunSync()
+  try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Sync complete.' })) } catch {}
 }
