@@ -1,77 +1,61 @@
-import React from 'react'
+// frontend/src/components/integrations/GoogleConnectCard.tsx
+// Small, self-contained card that talks to your existing OAuth + sync core.
+// - DOES NOT duplicate the ICS panel.
+// - Shows Connect/Disconnect, Enable Sync, Reset token, and a working Developer trace toggle.
+
+import React, { useMemo, useState } from 'react'
+import { featureFlags } from '../../state/featureFlags'
 import { readSyncConfig, writeSyncConfig, readTokens, writeTokens } from '../../sync/core'
-import { getAccessToken, clearAccessToken, beginGoogleOAuth } from '../../google/oauth'
+import { getAccessToken, revokeGoogle, startGoogleOAuth } from '../../google/oauth'
+
+const row: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between' }
+const small: React.CSSProperties = { fontSize: 12, opacity: 0.75 }
+
+function useConnected() {
+  // Consider connected if oauth blob exists or a valid token can be fetched.
+  const [tick, setTick] = useState(0)
+  const connected = useMemo(() => {
+    try {
+      const blob = localStorage.getItem('fc_google_oauth_v1')
+      return !!blob
+    } catch { return false }
+  }, [tick])
+  const refresh = () => setTick(t => t + 1)
+  return { connected, refresh }
+}
 
 export default function GoogleConnectCard() {
-  const [connected, setConnected] = React.useState<boolean>(false)
-  const [email, setEmail] = React.useState<string | null>(null)
-  const [enabled, setEnabled] = React.useState<boolean>(false)
-  const [busy, setBusy] = React.useState(false)
-  const [trace, setTrace] = React.useState<boolean>(() => !!localStorage.getItem('fc_sync_trace'))
-
-  React.useEffect(() => {
-    // read sync enabled
-    const cfg = readSyncConfig()
-    setEnabled(!!cfg.enabled && !!cfg.providers?.google?.enabled)
-
-    // probe token
-    ;(async () => {
-      try {
-        const token = await getAccessToken()
-        if (token) {
-          setConnected(true)
-          // if your oauth util exposes profile email, set it; otherwise omit
-          try {
-            const payload = JSON.parse(atob(token.split('.')[1] || 'e30=')) || {}
-            setEmail(payload?.email || null)
-          } catch {
-            setEmail(null)
-          }
-        } else {
-          setConnected(false)
-          setEmail(null)
-        }
-      } catch {
-        setConnected(false)
-        setEmail(null)
-      }
-    })()
-  }, [])
-
-  function onToggleTrace(e: React.ChangeEvent<HTMLInputElement>) {
-    const on = e.currentTarget.checked
-    setTrace(on)
-    if (on) localStorage.setItem('fc_sync_trace', '1')
-    else localStorage.removeItem('fc_sync_trace')
-  }
+  const { connected, refresh } = useConnected()
+  const [busy, setBusy] = useState<string | null>(null)
+  const [msg, setMsg] = useState<string | null>(null)
 
   async function onConnect() {
-    setBusy(true)
+    setBusy('connect'); setMsg(null)
     try {
-      await beginGoogleOAuth() // redirects; if your oauth util is different, it can just set window.location
-    } finally {
-      setBusy(false)
-    }
+      // delegate to your existing OAuth helper
+      await startGoogleOAuth() // navigates to Google; helper will store fc_google_oauth_v1 on return
+    } catch (e:any) {
+      console.warn(e)
+      alert('Could not start Google sign-in.')
+    } finally { setBusy(null) }
   }
 
   async function onDisconnect() {
-    if (!confirm('Disconnect Google account?')) return
-    setBusy(true)
+    if (!confirm('Disconnect Google from Family Calendar?')) return
+    setBusy('disconnect'); setMsg(null)
     try {
-      await clearAccessToken()
-      setConnected(false)
-      setEmail(null)
-      // also turn off provider in config
+      await revokeGoogle().catch(() => {}) // best-effort revoke
+      localStorage.removeItem('fc_google_oauth_v1')
+      // Also disable provider in sync config to be explicit
       const cfg = readSyncConfig()
       const next = {
         ...cfg,
-        providers: { ...(cfg.providers || {}), google: { enabled: false, calendars: [] } },
-        enabled: false ? cfg.enabled && false : cfg.enabled // leave master alone; we only disable the google provider
+        providers: { ...(cfg.providers||{}), google: { enabled: false, calendars: [], accountKey: undefined } }
       }
       writeSyncConfig(next)
-    } finally {
-      setBusy(false)
-    }
+      setMsg('Disconnected.')
+      refresh()
+    } finally { setBusy(null) }
   }
 
   function onEnableSync() {
@@ -79,76 +63,86 @@ export default function GoogleConnectCard() {
     const next = {
       ...cfg,
       enabled: true,
-      windowWeeks: cfg.windowWeeks || 8,
       providers: {
         ...(cfg.providers || {}),
         google: {
           enabled: true,
-          accountKey: cfg.providers?.google?.accountKey || 'primary',
+          accountKey: cfg.providers?.google?.accountKey || 'default',
           calendars: cfg.providers?.google?.calendars || ['primary'],
         },
       },
+      windowWeeks: cfg.windowWeeks || 8,
     }
     writeSyncConfig(next)
-    setEnabled(true)
-    toast('Cloud sync enabled (Google).')
+    try { window.dispatchEvent(new CustomEvent('toast',{detail:'Cloud sync enabled (Google).'})) } catch {}
   }
 
   function onDisableSync() {
     const cfg = readSyncConfig()
     const next = {
       ...cfg,
-      providers: { ...(cfg.providers || {}), google: { ...(cfg.providers?.google || {}), enabled: false } },
+      providers: { ...(cfg.providers||{}), google: { ...(cfg.providers?.google||{}), enabled:false } },
     }
     writeSyncConfig(next)
-    setEnabled(false)
-    toast('Cloud sync disabled (Google).')
+    try { window.dispatchEvent(new CustomEvent('toast',{detail:'Cloud sync disabled (Google).'})) } catch {}
   }
 
-  function onResetSync() {
+  function onResetToken() {
+    // erase ONLY Google’s token; fall back to old key if present
     const t = readTokens()
-    delete (t as any).google
-    writeTokens(t)
-    toast('Google sync token reset. Next run will do a full refresh.')
+    if (t.google) { t.google.sinceToken = null; writeTokens(t) }
+    // legacy key
+    localStorage.removeItem('fc_google_sync_token_v1')
+    setMsg('Sync token reset. A fresh windowed pull will run on next cycle.')
+    try { window.dispatchEvent(new Event('fc:sync-trace')) } catch {}
   }
+
+  function onToggleTrace(e: React.ChangeEvent<HTMLInputElement>) {
+    const on = e.currentTarget.checked
+    const cur = featureFlags.get()
+    featureFlags.set({ ...cur, googleTrace: on })
+  }
+
+  const traceOn = !!featureFlags.get().googleTrace
+  const cfg = readSyncConfig()
+  const gEnabled = !!cfg.providers?.google?.enabled
+  const appSyncOn = !!cfg.enabled
 
   return (
-    <div style={wrap}>
+    <div style={{ display: 'grid', gap: 10 }}>
       <div style={row}>
         <div>
-          <div style={{ fontWeight: 600 }}>Status: {connected ? 'Connected' : 'Not connected'}</div>
-          {connected && email && <div style={{ opacity: .7, fontSize: 12 }}>{email}</div>}
+          <div><strong>Status:</strong> {connected ? 'Connected' : 'Not connected'}</div>
+          {!connected && <div style={small}>Sign in with Google to enable two-way sync.</div>}
         </div>
         <div style={{ display:'flex', gap:8 }}>
           {!connected ? (
-            <button onClick={onConnect} disabled={busy}>Connect Google</button>
+            <button onClick={onConnect} disabled={busy==='connect'} className="primary">
+              {busy==='connect' ? 'Connecting…' : 'Connect Google'}
+            </button>
           ) : (
-            <button onClick={onDisconnect} disabled={busy}>Disconnect</button>
+            <button onClick={onDisconnect} disabled={busy==='disconnect'} style={{ color:'crimson' }}>
+              {busy==='disconnect' ? 'Disconnecting…' : 'Disconnect'}
+            </button>
           )}
-          {connected && (!enabled ? (
-            <button onClick={onEnableSync} className="primary" disabled={busy}>Enable Sync</button>
-          ) : (
-            <button onClick={onDisableSync} disabled={busy}>Disable Sync</button>
-          ))}
-          <button onClick={onResetSync} disabled={!connected || busy}>Reset Google sync</button>
         </div>
       </div>
 
-      <label style={{ display:'inline-flex', alignItems:'center', gap:6, marginTop:8 }}>
-        <input type="checkbox" checked={trace} onChange={onToggleTrace} />
+      <div style={row}>
+        <div><strong>Sync:</strong> {gEnabled && appSyncOn ? 'Enabled' : 'Disabled'}</div>
+        <div style={{ display:'flex', gap:8 }}>
+          <button onClick={onEnableSync}>Enable Sync</button>
+          <button onClick={onDisableSync}>Disable</button>
+          <button onClick={onResetToken}>Reset Google sync</button>
+        </div>
+      </div>
+
+      <label style={{ display:'inline-flex', alignItems:'center', gap:8 }}>
+        <input type="checkbox" checked={traceOn} onChange={onToggleTrace} />
         <span>Developer trace</span>
       </label>
 
-      <p style={hint}>
-        Two-way sync: edits you make here are pushed to Google; changes in Google are pulled into the app.
-        Public ICS (in Integrations) is read-only.
-      </p>
+      {msg && <div style={{ ...small, color:'#2563eb' }}>{msg}</div>}
     </div>
   )
 }
-
-function toast(msg:string){ try{ window.dispatchEvent(new CustomEvent('toast',{detail:msg})) }catch{} }
-
-const wrap: React.CSSProperties = { padding: 12, border: '1px solid #e5e7eb', borderRadius: 12, background:'#fff' }
-const row:  React.CSSProperties = { display:'flex', justifyContent:'space-between', alignItems:'center', gap:12, flexWrap:'wrap' }
-const hint: React.CSSProperties = { color:'#64748b', fontSize:12, margin:'8px 0 0' }
