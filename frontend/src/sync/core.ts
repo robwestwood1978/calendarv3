@@ -40,18 +40,26 @@ export type LocalStore = {
   listRange(startISO: string, endISO: string): LocalEvent[]
   upsertMany(rows: LocalEvent[]): void
   applyDeletes(localIds: string[]): void
-  rebind(localId: string, boundRef: { provider: string; calendarId: string; externalId: string; etag?: string }): void
+  rebind(
+    localId: string,
+    boundRef: { provider: string; calendarId: string; externalId: string; etag?: string }
+  ): void
 }
 
 export async function runSyncOnce(params: {
-  adapters: ProviderAdapter[]
+  adapters?: ProviderAdapter[] | null
   store: LocalStore
   now?: Date
 }): Promise<{ ok: boolean; detail?: string }> {
+  // Guard: nothing to do until adapters are provided
+  if (!params.adapters || params.adapters.length === 0) {
+    return { ok: true, detail: 'no adapters' }
+  }
+
   const cfg = readSyncConfig()
   if (!cfg.enabled) return { ok: true, detail: 'sync disabled' }
 
-  const now = (params.now ? DateTime.fromJSDate(params.now) : DateTime.local())
+  const now = params.now ? DateTime.fromJSDate(params.now) : DateTime.local()
   const start = now.startOf('day').toISO()!
   const end = now.plus({ weeks: cfg.windowWeeks }).endOf('day').toISO()!
 
@@ -59,31 +67,28 @@ export async function runSyncOnce(params: {
 
   // 1) PULL phase — provider deltas into local
   for (const ad of params.adapters) {
+    if (!ad || !ad.provider || typeof ad.pull !== 'function') continue
     const t = tokens[ad.provider]?.sinceToken ?? null
     try {
       const res = await ad.pull({ sinceToken: t, rangeStartISO: start, rangeEndISO: end })
-      // map RemoteDelta → local upserts/deletes
+
       const upserts: LocalEvent[] = []
-      const deletes: string[] = []
+      // const deletes: string[] = []  // hook if you wire delete mapping
 
       for (const d of res.events) {
         if (d.operation === 'delete') {
-          // If you store remote bindings, resolve local id by binding (left to your store)
-          // Here we skip and let your store handle delete mapping externally if needed
+          // delete mapping optional — your store can do binding lookups
           continue
-        } else {
-          // minimal upsert; your adapter should already map payload fields to LocalEvent
-          if (d.payload) upserts.push({ ...(d.payload as any) })
+        } else if (d.payload) {
+          upserts.push({ ...(d.payload as any) })
         }
       }
 
       if (upserts.length) params.store.upsertMany(upserts)
-      // deletes: optional -> params.store.applyDeletes(deletes)
 
       tokens[ad.provider] = { sinceToken: res.token ?? null, lastRunISO: now.toISO()! }
       writeTokens(tokens)
-    } catch (e: any) {
-      // log and continue with other providers
+    } catch (e) {
       console.warn(`pull failed for ${ad.provider}`, e)
     }
   }
@@ -92,21 +97,24 @@ export async function runSyncOnce(params: {
   const batch = popBatch(50)
   if (batch.length === 0) return { ok: true }
 
-  // Build intents per provider; for now we route to all enabled providers
-  const results: PushResult[] = []
   for (const ad of params.adapters) {
+    if (!ad || typeof ad.push !== 'function') continue
     try {
-      // In a real binding-aware flow, select only entries bound (or targetable) for that provider
-      const intents: PushIntent[] = batch.map(j => ({
+      const intents: PushIntent[] = batch.map((j) => ({
         action: j.action,
-        local: params.store.listRange(j.at, j.at)[0] || { id: j.eventId, title: '', start: j.at, end: j.at } as any
+        local:
+          params.store.listRange(j.at, j.at)[0] ||
+          ({ id: j.eventId, title: '', start: j.at, end: j.at } as any),
       }))
-      const rs = await ad.push(intents)
-      results.push(...rs)
-      // If success, drop those journal ids
-      const okIds = rs.filter(r => r.ok).map((_, i) => batch[i]?.journalId).filter(Boolean) as string[]
+      const rs: PushResult[] = await ad.push(intents)
+
+      // Drop successful journal entries
+      const okIds = rs
+        .map((r, i) => (r.ok ? batch[i]?.journalId : undefined))
+        .filter(Boolean) as string[]
       if (okIds.length) dropEntries(okIds)
-      // Apply new bindings
+
+      // Apply bindings for newly created/updated items
       for (const r of rs) {
         if (r.ok && r.bound) {
           params.store.rebind(r.localId, r.bound)
