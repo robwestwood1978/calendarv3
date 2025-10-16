@@ -1,9 +1,7 @@
 // frontend/src/components/integrations/GoogleConnectCard.tsx
-// Small, self-contained card that plugs into your existing sync core.
-// - No imports from google/oauth.ts — avoids missing export errors.
-// - Connect = redirect to your OAuth start route (handled by maybeHandleRedirect on boot).
-// - Disconnect = clear stored token + disable Google in sync config.
-// - Enable/Disable sync + Reset token + Developer trace toggle.
+// Connects Google without hardcoding a backend route.
+// Emits 'fc:google-oauth-start' so main.tsx can call startGoogleOAuth().
+// Keeps enable/disable sync + reset token + developer trace.
 
 import React, { useMemo, useState } from 'react'
 import { featureFlags } from '../../state/featureFlags'
@@ -12,16 +10,10 @@ import { readSyncConfig, writeSyncConfig, readTokens, writeTokens } from '../../
 const row: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between' }
 const small: React.CSSProperties = { fontSize: 12, opacity: 0.75 }
 
-// If your OAuth start path differs, change this to match your backend route.
-// Your main.tsx already calls maybeHandleRedirect() on boot and sends users off /oauth2/callback to /settings.
-const OAUTH_START_PATH = '/oauth2/start'
-
 function useConnected() {
   const [tick, setTick] = useState(0)
   const connected = useMemo(() => {
-    try {
-      return !!localStorage.getItem('fc_google_oauth_v1')
-    } catch { return false }
+    try { return !!localStorage.getItem('fc_google_oauth_v1') } catch { return false }
   }, [tick])
   const refresh = () => setTick(t => t + 1)
   return { connected, refresh }
@@ -32,14 +24,11 @@ export default function GoogleConnectCard() {
   const [busy, setBusy] = useState<string | null>(null)
   const [msg, setMsg] = useState<string | null>(null)
 
-  async function onConnect() {
+  function onConnect() {
     setBusy('connect'); setMsg(null)
     try {
-      const url = new URL(OAUTH_START_PATH, window.location.origin)
-      url.searchParams.set('provider', 'google')
-      // Where to return after /oauth2/callback finishes
-      url.searchParams.set('redirect', '/settings')
-      window.location.assign(url.toString())
+      // Let main.tsx decide how to start OAuth (uses your existing google/oauth.ts)
+      window.dispatchEvent(new CustomEvent('fc:google-oauth-start', { detail: { redirect: '/settings' } }))
     } catch (e) {
       console.warn(e)
       alert('Could not start Google sign-in.')
@@ -48,13 +37,11 @@ export default function GoogleConnectCard() {
     }
   }
 
-  async function onDisconnect() {
+  function onDisconnect() {
     if (!confirm('Disconnect Google from Family Calendar?')) return
     setBusy('disconnect'); setMsg(null)
     try {
-      // Best-effort local revoke
-      localStorage.removeItem('fc_google_oauth_v1')
-      // Explicitly disable Google in sync config
+      localStorage.removeItem('fc_google_oauth_v1') // remove stored token blob
       const cfg = readSyncConfig()
       const next = {
         ...cfg,
@@ -101,20 +88,14 @@ export default function GoogleConnectCard() {
 
   function onResetToken() {
     const t = readTokens()
-    if (t.google) {
-      t.google.sinceToken = null
-      writeTokens(t)
-    }
-    // Legacy key, harmless if absent
+    if (t.google) { t.google.sinceToken = null; writeTokens(t) }
     try { localStorage.removeItem('fc_google_sync_token_v1') } catch {}
-    setMsg('Sync token reset. A fresh windowed pull will run on the next cycle.')
-    try { window.dispatchEvent(new Event('fc:sync-trace')) } catch {}
+    setMsg('Sync token reset. A fresh pull will run on the next cycle.')
   }
 
   function onToggleTrace(e: React.ChangeEvent<HTMLInputElement>) {
     const on = e.currentTarget.checked
-    const cur = featureFlags.get()
-    featureFlags.set({ ...cur, googleTrace: on })
+    featureFlags.set({ ...featureFlags.get(), googleTrace: on })
   }
 
   const traceOn = !!featureFlags.get().googleTrace
