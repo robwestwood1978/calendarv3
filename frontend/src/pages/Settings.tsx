@@ -1,6 +1,6 @@
 // frontend/src/pages/Settings.tsx
-// Your original SettingsPage + IntegrationsPanel, unchanged,
-// plus ONE Google Calendar card that plugs into the existing sync plumbing.
+// Your original page restored, plus a single Google section beneath Integrations.
+// Keeps Experiments + Account panel exactly like before.
 
 import React, { useEffect, useState } from 'react'
 import SettingsPage from '../components/SettingsPage'
@@ -8,10 +8,10 @@ import { featureFlags } from '../state/featureFlags'
 import { useAuth } from '../auth/AuthProvider'
 import { useSettings } from '../state/settings'
 
-// Your existing ICS/Apple panel (unchanged)
+// Existing panel you already have
 import IntegrationsPanel from '../components/integrations/IntegrationsPanel'
 
-// NEW: two-way Google connector card (kept separate from ICS)
+// NEW: the small Google connect card
 import GoogleConnectCard from '../components/integrations/GoogleConnectCard'
 
 type Flags = ReturnType<typeof featureFlags.get>
@@ -26,16 +26,15 @@ export default function Settings() {
   function onToggleAuth(e: React.ChangeEvent<HTMLInputElement>) {
     const on = e.currentTarget.checked
     featureFlags.set({ authEnabled: on })
-    // reload so the top-right sign-in dock and protected routes refresh
     setTimeout(() => window.location.reload(), 0)
   }
 
   return (
     <div style={{ display: 'grid', gap: 16 }}>
-      {/* ===== Your full Settings UI (members, colours, pills, tags, what-to-bring, etc.) ===== */}
+      {/* Your household / appearance / tags etc. */}
       <SettingsPage />
 
-      {/* ===== Experiments (unchanged) ===== */}
+      {/* Experiments (unchanged) */}
       <section style={card}>
         <h3 style={h3}>Experiments</h3>
         <label style={row}>
@@ -49,28 +48,16 @@ export default function Settings() {
         <p style={hint}>When disabled, the app behaves exactly like Slice A/B.</p>
       </section>
 
-      {/* ===== Account (unchanged) ===== */}
+      {/* Account (unchanged) */}
       {flags.authEnabled && <AccountPanel />}
 
-      {/* ===== Integrations (read-only ICS / Apple) — unchanged ===== */}
+      {/* Integrations (Apple/ICS) — unchanged */}
       <IntegrationsPanel />
 
-      {/* ===== Two-way Google Calendar (OAuth) =====
-         - Only one card is rendered.
-         - This does NOT affect your ICS panel.
-         - Feature-flagged so you can hide it quickly if needed. */}
-      {featureFlags.get().google !== false && (
-        <section style={card}>
-          <h3 style={h3}>Google Calendar</h3>
-          <p style={hint}>
-            Connect your Google account to pull and push events within your sync window.
-            You can disconnect or reset the sync token at any time.
-          </p>
-          <div style={{ marginTop: 8 }}>
-            <GoogleConnectCard />
-          </div>
-        </section>
-      )}
+      {/* Google Calendar — add once, below Integrations */}
+      <section style={card}>
+        <GoogleConnectCard />
+      </section>
     </div>
   )
 }
@@ -111,9 +98,7 @@ function AccountPanel() {
                     <input
                       type="checkbox"
                       checked={linked}
-                      onChange={(e) =>
-                        e.currentTarget.checked ? linkMember(m.id) : unlinkMember(m.id)
-                      }
+                      onChange={(e) => e.currentTarget.checked ? linkMember(m.id) : unlinkMember(m.id)}
                     />
                     <span>{m.name}</span>
                   </label>
@@ -127,7 +112,7 @@ function AccountPanel() {
   )
 }
 
-/* ---------------- styles (match your baseline) ---------------- */
+/* ---------------- styles (unchanged) ---------------- */
 
 const card: React.CSSProperties = {
   background: '#fff',
