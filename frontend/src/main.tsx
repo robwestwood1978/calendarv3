@@ -40,15 +40,15 @@ import './styles.css'
 /* === Global toaster so ?sync=on/off shows a message === */
 import Toaster from './components/Toaster'
 
-/* ===== Slice D: Sync bootstrap (additive, no UI changes) ===== */
+/* ===== Slice D: Sync bootstrap ===== */
 import { startSyncLoop, maybeRunSync } from './sync/bootstrap'
 import { readSyncConfig, writeSyncConfig } from './sync/core'
 
-/* ===== Handle Google OAuth redirect on boot (no top-level await) ===== */
+/* ===== Handle Google OAuth redirect on boot ===== */
 import { maybeHandleRedirect } from './google/oauth'
 
-/* ===== NEW: write-through bridge to Google ===== */
-import { installGooglePushBridge } from './sync/push-bridge'
+// NEW: soft import types to avoid build break if oauth.ts doesn’t export this
+import * as GoogleOAuthMod from './google/oauth'
 
 function handleSyncURLToggle() {
   try {
@@ -100,7 +100,7 @@ function bootstrapSync() {
   startSyncLoop()
 }
 
-// --------- START APP (no top-level await) ----------
+// --------- START APP ----------
 async function startApp() {
   try {
     await maybeHandleRedirect()
@@ -112,12 +112,34 @@ async function startApp() {
     history.replaceState({}, '', '/settings')
   }
 
-  // Run migrations and start sync bootstrap
+  // NEW: wire the card’s connect button to your oauth module
+  window.addEventListener('fc:google-oauth-start', (ev: Event) => {
+    const ce = ev as CustomEvent<{ redirect?: string }>
+    const redirect = ce?.detail?.redirect || '/settings'
+    const fn = (GoogleOAuthMod as any).startGoogleOAuth
+    if (typeof fn === 'function') {
+      try {
+        fn({ redirect })
+      } catch (e) {
+        console.warn('startGoogleOAuth failed:', e)
+        alert('Could not start Google sign-in.')
+      }
+    } else {
+      // Fallback: older deployments might have used a server route
+      try {
+        const url = new URL('/oauth2/start', window.location.origin)
+        url.searchParams.set('provider', 'google')
+        url.searchParams.set('redirect', redirect)
+        window.location.assign(url.toString())
+      } catch {
+        alert('Google sign-in is not configured in this build.')
+      }
+    }
+  })
+
+  // migrations + sync
   migrateSliceC()
   bootstrapSync()
-
-  // NEW: start write-through bridge
-  installGooglePushBridge()
 
   function RootApp() {
     const [pulse, setPulse] = React.useState(0)
