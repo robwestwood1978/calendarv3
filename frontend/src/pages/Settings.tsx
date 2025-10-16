@@ -1,12 +1,18 @@
 // frontend/src/pages/Settings.tsx
-// Baseline D Settings restored (pills/appearance unchanged). Single integrations card.
+// Your original SettingsPage + IntegrationsPanel, unchanged,
+// plus ONE Google Calendar card that plugs into the existing sync plumbing.
 
 import React, { useEffect, useState } from 'react'
 import SettingsPage from '../components/SettingsPage'
 import { featureFlags } from '../state/featureFlags'
 import { useAuth } from '../auth/AuthProvider'
 import { useSettings } from '../state/settings'
+
+// Your existing ICS/Apple panel (unchanged)
 import IntegrationsPanel from '../components/integrations/IntegrationsPanel'
+
+// NEW: two-way Google connector card (kept separate from ICS)
+import GoogleConnectCard from '../components/integrations/GoogleConnectCard'
 
 type Flags = ReturnType<typeof featureFlags.get>
 
@@ -20,29 +26,51 @@ export default function Settings() {
   function onToggleAuth(e: React.ChangeEvent<HTMLInputElement>) {
     const on = e.currentTarget.checked
     featureFlags.set({ authEnabled: on })
+    // reload so the top-right sign-in dock and protected routes refresh
     setTimeout(() => window.location.reload(), 0)
   }
 
   return (
     <div style={{ display: 'grid', gap: 16 }}>
-      {/* Your original household/appearance/tags “pills” UI */}
+      {/* ===== Your full Settings UI (members, colours, pills, tags, what-to-bring, etc.) ===== */}
       <SettingsPage />
 
-      {/* Experiments */}
+      {/* ===== Experiments (unchanged) ===== */}
       <section style={card}>
         <h3 style={h3}>Experiments</h3>
         <label style={row}>
-          <input type="checkbox" checked={!!flags.authEnabled} onChange={onToggleAuth} />
+          <input
+            type="checkbox"
+            checked={!!flags.authEnabled}
+            onChange={onToggleAuth}
+          />
           <span>Enable accounts (sign-in)</span>
         </label>
         <p style={hint}>When disabled, the app behaves exactly like Slice A/B.</p>
       </section>
 
-      {/* Account */}
+      {/* ===== Account (unchanged) ===== */}
       {flags.authEnabled && <AccountPanel />}
 
-      {/* Integrations (Apple/ICS; Google OAuth lives in its own connect card elsewhere if you enable it) */}
+      {/* ===== Integrations (read-only ICS / Apple) — unchanged ===== */}
       <IntegrationsPanel />
+
+      {/* ===== Two-way Google Calendar (OAuth) =====
+         - Only one card is rendered.
+         - This does NOT affect your ICS panel.
+         - Feature-flagged so you can hide it quickly if needed. */}
+      {featureFlags.get().google !== false && (
+        <section style={card}>
+          <h3 style={h3}>Google Calendar</h3>
+          <p style={hint}>
+            Connect your Google account to pull and push events within your sync window.
+            You can disconnect or reset the sync token at any time.
+          </p>
+          <div style={{ marginTop: 8 }}>
+            <GoogleConnectCard />
+          </div>
+        </section>
+      )}
     </div>
   )
 }
@@ -61,15 +89,14 @@ function AccountPanel() {
           <p style={hint}>Not signed in. Use the button in the top-right to sign in with a seed account.</p>
           <p style={hint}>
             Seed users: <code>parent@local.test</code> / <code>parent123</code>,
-            <code> adult@local.test</code> / <code>adult123</code>, <code> child@local.test</code> / <code>child123</code>.
+            <code> adult@local.test</code> / <code>adult123</code>,
+            <code> child@local.test</code> / <code>child123</code>.
           </p>
         </>
       ) : (
         <>
           <div style={box}>
-            <div>
-              <strong>{currentUser.email}</strong>
-            </div>
+            <div><strong>{currentUser.email}</strong></div>
             <div>Role: {currentUser.role}</div>
           </div>
 
@@ -84,7 +111,9 @@ function AccountPanel() {
                     <input
                       type="checkbox"
                       checked={linked}
-                      onChange={(e) => (e.currentTarget.checked ? linkMember(m.id) : unlinkMember(m.id))}
+                      onChange={(e) =>
+                        e.currentTarget.checked ? linkMember(m.id) : unlinkMember(m.id)
+                      }
                     />
                     <span>{m.name}</span>
                   </label>
