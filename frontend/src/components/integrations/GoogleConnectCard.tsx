@@ -1,23 +1,26 @@
 // frontend/src/components/integrations/GoogleConnectCard.tsx
-// Small, self-contained card that talks to your existing OAuth + sync core.
-// - DOES NOT duplicate the ICS panel.
-// - Shows Connect/Disconnect, Enable Sync, Reset token, and a working Developer trace toggle.
+// Small, self-contained card that plugs into your existing sync core.
+// - No imports from google/oauth.ts — avoids missing export errors.
+// - Connect = redirect to your OAuth start route (handled by maybeHandleRedirect on boot).
+// - Disconnect = clear stored token + disable Google in sync config.
+// - Enable/Disable sync + Reset token + Developer trace toggle.
 
 import React, { useMemo, useState } from 'react'
 import { featureFlags } from '../../state/featureFlags'
 import { readSyncConfig, writeSyncConfig, readTokens, writeTokens } from '../../sync/core'
-import { getAccessToken, revokeGoogle, startGoogleOAuth } from '../../google/oauth'
 
 const row: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between' }
 const small: React.CSSProperties = { fontSize: 12, opacity: 0.75 }
 
+// If your OAuth start path differs, change this to match your backend route.
+// Your main.tsx already calls maybeHandleRedirect() on boot and sends users off /oauth2/callback to /settings.
+const OAUTH_START_PATH = '/oauth2/start'
+
 function useConnected() {
-  // Consider connected if oauth blob exists or a valid token can be fetched.
   const [tick, setTick] = useState(0)
   const connected = useMemo(() => {
     try {
-      const blob = localStorage.getItem('fc_google_oauth_v1')
-      return !!blob
+      return !!localStorage.getItem('fc_google_oauth_v1')
     } catch { return false }
   }, [tick])
   const refresh = () => setTick(t => t + 1)
@@ -32,30 +35,39 @@ export default function GoogleConnectCard() {
   async function onConnect() {
     setBusy('connect'); setMsg(null)
     try {
-      // delegate to your existing OAuth helper
-      await startGoogleOAuth() // navigates to Google; helper will store fc_google_oauth_v1 on return
-    } catch (e:any) {
+      const url = new URL(OAUTH_START_PATH, window.location.origin)
+      url.searchParams.set('provider', 'google')
+      // Where to return after /oauth2/callback finishes
+      url.searchParams.set('redirect', '/settings')
+      window.location.assign(url.toString())
+    } catch (e) {
       console.warn(e)
       alert('Could not start Google sign-in.')
-    } finally { setBusy(null) }
+    } finally {
+      setBusy(null)
+    }
   }
 
   async function onDisconnect() {
     if (!confirm('Disconnect Google from Family Calendar?')) return
     setBusy('disconnect'); setMsg(null)
     try {
-      await revokeGoogle().catch(() => {}) // best-effort revoke
+      // Best-effort local revoke
       localStorage.removeItem('fc_google_oauth_v1')
-      // Also disable provider in sync config to be explicit
+      // Explicitly disable Google in sync config
       const cfg = readSyncConfig()
       const next = {
         ...cfg,
-        providers: { ...(cfg.providers||{}), google: { enabled: false, calendars: [], accountKey: undefined } }
+        providers: { ...(cfg.providers || {}), google: { enabled: false, calendars: [], accountKey: undefined } },
       }
       writeSyncConfig(next)
       setMsg('Disconnected.')
       refresh()
-    } finally { setBusy(null) }
+    } catch (e) {
+      console.warn(e)
+    } finally {
+      setBusy(null)
+    }
   }
 
   function onEnableSync() {
@@ -74,26 +86,28 @@ export default function GoogleConnectCard() {
       windowWeeks: cfg.windowWeeks || 8,
     }
     writeSyncConfig(next)
-    try { window.dispatchEvent(new CustomEvent('toast',{detail:'Cloud sync enabled (Google).'})) } catch {}
+    try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Cloud sync enabled (Google).' })) } catch {}
   }
 
   function onDisableSync() {
     const cfg = readSyncConfig()
     const next = {
       ...cfg,
-      providers: { ...(cfg.providers||{}), google: { ...(cfg.providers?.google||{}), enabled:false } },
+      providers: { ...(cfg.providers || {}), google: { ...(cfg.providers?.google || {}), enabled: false } },
     }
     writeSyncConfig(next)
-    try { window.dispatchEvent(new CustomEvent('toast',{detail:'Cloud sync disabled (Google).'})) } catch {}
+    try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Cloud sync disabled (Google).' })) } catch {}
   }
 
   function onResetToken() {
-    // erase ONLY Google’s token; fall back to old key if present
     const t = readTokens()
-    if (t.google) { t.google.sinceToken = null; writeTokens(t) }
-    // legacy key
-    localStorage.removeItem('fc_google_sync_token_v1')
-    setMsg('Sync token reset. A fresh windowed pull will run on next cycle.')
+    if (t.google) {
+      t.google.sinceToken = null
+      writeTokens(t)
+    }
+    // Legacy key, harmless if absent
+    try { localStorage.removeItem('fc_google_sync_token_v1') } catch {}
+    setMsg('Sync token reset. A fresh windowed pull will run on the next cycle.')
     try { window.dispatchEvent(new Event('fc:sync-trace')) } catch {}
   }
 
