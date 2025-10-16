@@ -1,4 +1,6 @@
 // frontend/src/pages/Settings.tsx
+// Baseline D Settings restored (pills/appearance unchanged). Single integrations card.
+
 import React, { useEffect, useState } from 'react'
 import SettingsPage from '../components/SettingsPage'
 import { featureFlags } from '../state/featureFlags'
@@ -23,67 +25,25 @@ export default function Settings() {
 
   return (
     <div style={{ display: 'grid', gap: 16 }}>
-      {/* Your full baseline settings UI */}
+      {/* Your original household/appearance/tags “pills” UI */}
       <SettingsPage />
 
-      {/* Experiments (unchanged) */}
+      {/* Experiments */}
       <section style={card}>
         <h3 style={h3}>Experiments</h3>
         <label style={row}>
-          <input
-            type="checkbox"
-            checked={!!flags.authEnabled}
-            onChange={onToggleAuth}
-          />
+          <input type="checkbox" checked={!!flags.authEnabled} onChange={onToggleAuth} />
           <span>Enable accounts (sign-in)</span>
         </label>
         <p style={hint}>When disabled, the app behaves exactly like Slice A/B.</p>
       </section>
 
-      {/* Account (unchanged) */}
+      {/* Account */}
       {flags.authEnabled && <AccountPanel />}
 
-      {/* Integrations (unchanged). This already contains the Google card.
-          IMPORTANT: We do NOT render a second Google tile anymore. */}
+      {/* Integrations (Apple/ICS; Google OAuth lives in its own connect card elsewhere if you enable it) */}
       <IntegrationsPanel />
-
-      {/* Optional: small helper for tracing + token reset (doesn't duplicate Google UI) */}
-      <DeveloperSyncTools />
     </div>
-  )
-}
-
-function DeveloperSyncTools() {
-  const [trace, setTrace] = React.useState<boolean>(() => {
-    try { return localStorage.getItem('fc_sync_trace_v1') === '1' } catch { return false }
-  })
-
-  const toggleTrace = (on: boolean) => {
-    try { localStorage.setItem('fc_sync_trace_v1', on ? '1' : '0') } catch {}
-    setTrace(on)
-    try { window.dispatchEvent(new CustomEvent('toast', { detail: `Developer trace ${on ? 'on' : 'off'}.` })) } catch {}
-  }
-
-  const resetGoogleSync = () => {
-    try { localStorage.removeItem('fc_google_sync_token_v1') } catch {}
-    try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Google sync token cleared.' })) } catch {}
-    try { window.dispatchEvent(new Event('fc:sync-now')) } catch {}
-  }
-
-  return (
-    <section style={card}>
-      <h3 style={h3}>Developer trace</h3>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-        <label style={row}>
-          <input type="checkbox" checked={trace} onChange={e => toggleTrace(e.currentTarget.checked)} />
-          <span>Write extra sync output to console</span>
-        </label>
-        <button onClick={resetGoogleSync}>Reset Google sync</button>
-      </div>
-      <p style={hint}>
-        If you ever see <code>syncTokenWithNonDefaultOrdering</code> or stale data, reset the token to force a fresh pull.
-      </p>
-    </section>
   )
 }
 
@@ -101,14 +61,15 @@ function AccountPanel() {
           <p style={hint}>Not signed in. Use the button in the top-right to sign in with a seed account.</p>
           <p style={hint}>
             Seed users: <code>parent@local.test</code> / <code>parent123</code>,
-            <code> adult@local.test</code> / <code>adult123</code>,
-            <code> child@local.test</code> / <code>child123</code>.
+            <code> adult@local.test</code> / <code>adult123</code>, <code> child@local.test</code> / <code>child123</code>.
           </p>
         </>
       ) : (
         <>
           <div style={box}>
-            <div><strong>{currentUser.email}</strong></div>
+            <div>
+              <strong>{currentUser.email}</strong>
+            </div>
             <div>Role: {currentUser.role}</div>
           </div>
 
@@ -123,7 +84,7 @@ function AccountPanel() {
                     <input
                       type="checkbox"
                       checked={linked}
-                      onChange={(e) => e.currentTarget.checked ? linkMember(m.id) : unlinkMember(m.id)}
+                      onChange={(e) => (e.currentTarget.checked ? linkMember(m.id) : unlinkMember(m.id))}
                     />
                     <span>{m.name}</span>
                   </label>
