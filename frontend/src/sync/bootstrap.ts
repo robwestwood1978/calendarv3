@@ -1,11 +1,14 @@
 // frontend/src/sync/bootstrap.ts
-// Simple scheduler that assembles adapters and runs runSyncOnce on an interval.
+// Start the loop once; avoid double-initialisation.
 
 import { runSyncOnce, readSyncConfig, type LocalStore } from './core'
+
+// IMPORTANT: keep using your existing working Google adapter file
 import { createGoogleAdapter } from './google'
 
 let _store: LocalStore | null = null
 let _timer: number | null = null
+let _started = false
 
 export function registerLocalStore(store: LocalStore) {
   _store = store
@@ -17,12 +20,11 @@ function buildAdapters() {
   if (cfg.providers?.google?.enabled) {
     adapters.push(createGoogleAdapter({
       accountKey: cfg.providers.google.accountKey,
-      calendars: cfg.providers.google.calendars && cfg.providers.google.calendars.length
+      calendars: (cfg.providers.google.calendars && cfg.providers.google.calendars.length)
         ? cfg.providers.google.calendars
         : ['primary'],
     }))
   }
-  // Apple adapter would be built here if/when enabled
   return adapters
 }
 
@@ -35,11 +37,10 @@ export function maybeRunSync() {
 }
 
 export function startSyncLoop(intervalMs = 30_000) {
-  const tick = () => {
-    try { maybeRunSync() } catch (e) { console.warn('[sync] run failed:', e) }
-  }
+  if (_started) return
+  _started = true
+  const tick = () => { try { maybeRunSync() } catch (e) { console.warn('[sync] run failed:', e) } }
   if (_timer != null) clearInterval(_timer as any)
   _timer = setInterval(tick, intervalMs) as any
-  // run a first tick quickly
   setTimeout(tick, 800)
 }
