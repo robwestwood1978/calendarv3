@@ -1,46 +1,57 @@
-// frontend/src/sync/bootstrap.ts
-// Start the loop once; avoid double-initialisation.
+// Bootstraps sync: journalizer + run loop + Google adapter wiring.
 
-import { runSyncOnce, readSyncConfig, type LocalStore } from './core'
-
-// IMPORTANT: keep using your existing working Google adapter file
+import { runSyncOnce } from './core'
+import { localStore } from './localStore'
+import { startJournalizer } from './journalizer'
+import { readSyncConfig } from './core'
 import { createGoogleAdapter } from './google'
 
-let _store: LocalStore | null = null
-let _timer: number | null = null
-let _started = false
-
-export function registerLocalStore(store: LocalStore) {
-  _store = store
-}
+let loopOn = false
+let timer: any = null
 
 function buildAdapters() {
   const cfg = readSyncConfig()
-  const adapters = []
+  const ads = []
   if (cfg.providers?.google?.enabled) {
-    adapters.push(createGoogleAdapter({
-      accountKey: cfg.providers.google.accountKey,
-      calendars: (cfg.providers.google.calendars && cfg.providers.google.calendars.length)
+    ads.push(createGoogleAdapter({
+      accountKey: cfg.providers.google.accountKey || undefined,
+      calendars: cfg.providers.google.calendars && cfg.providers.google.calendars.length
         ? cfg.providers.google.calendars
         : ['primary'],
     }))
   }
-  return adapters
+  // (Apple adapter would be added here later)
+  return ads
 }
 
-export function maybeRunSync() {
+export async function maybeRunSync() {
   const cfg = readSyncConfig()
-  if (!cfg.enabled || !_store) return
-  const adapters = buildAdapters()
-  if (adapters.length === 0) return
-  runSyncOnce({ adapters, store: _store })
+  if (!cfg.enabled) return
+  try {
+    console.log('[sync] run…', new Date().toISOString())
+    await runSyncOnce({ adapters: buildAdapters(), store: localStore })
+    console.log('[sync] done:', { ok: true })
+  } catch (e) {
+    console.warn('[sync] run failed:', e)
+  }
 }
 
 export function startSyncLoop(intervalMs = 30_000) {
-  if (_started) return
-  _started = true
-  const tick = () => { try { maybeRunSync() } catch (e) { console.warn('[sync] run failed:', e) } }
-  if (_timer != null) clearInterval(_timer as any)
-  _timer = setInterval(tick, intervalMs) as any
-  setTimeout(tick, 800)
+  if (loopOn) return
+  loopOn = true
+
+  // Start the journalizer so we actually get push entries
+  startJournalizer()
+
+  // Tick on visibility change (fast catch-up when the tab refocuses)
+  const onVis = () => { if (document.visibilityState === 'visible') maybeRunSync() }
+  document.addEventListener('visibilitychange', onVis)
+
+  // Initial run + interval
+  maybeRunSync()
+  timer = setInterval(maybeRunSync, intervalMs)
+
+  // Expose controls for debugging
+  ;(window as any).__sync_run = maybeRunSync
+  ;(window as any).__sync_stop = () => { clearInterval(timer); loopOn = false }
 }
