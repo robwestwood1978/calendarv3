@@ -13,8 +13,9 @@ if (typeof window !== 'undefined') {
       localStorage.removeItem('fc_my_agenda_v1')
       localStorage.removeItem('fc_feature_flags_v1')
       localStorage.removeItem('fc_google_oauth_v1')
-      // optional but harmless if present:
+      localStorage.removeItem('fc_sync_cfg_v1')
       localStorage.removeItem('fc_sync_tokens_v1')
+      localStorage.removeItem('fc_journal_shadow_v1')
       localStorage.removeItem('fc_sync_journal_v1')
       alert('Local data cleared. Reloading…')
     } catch {}
@@ -44,14 +45,13 @@ import './styles.css'
 import Toaster from './components/Toaster'
 
 /* ===== Slice D: Sync bootstrap ===== */
-import { startSyncLoop, maybeRunSync, registerLocalStore } from './sync/bootstrap'
+import { startSyncLoop, maybeRunSync } from './sync/bootstrap'
 import { readSyncConfig, writeSyncConfig } from './sync/core'
-import { getLocalStore } from './sync/localStore'   // ⬅️ NEW
 
 /* ===== Handle Google OAuth redirect on boot ===== */
 import { maybeHandleRedirect } from './google/oauth'
 
-// NEW: soft import types to avoid build break if oauth.ts doesn’t export this
+// Soft import to optionally call startGoogleOAuth if your module exports it
 import * as GoogleOAuthMod from './google/oauth'
 
 function handleSyncURLToggle() {
@@ -73,7 +73,7 @@ function handleSyncURLToggle() {
             calendars: cfg.providers?.google?.calendars || [],
           },
           apple: {
-            enabled: false,
+            enabled: cfg.providers?.apple?.enabled || false,
             accountKey: cfg.providers?.apple?.accountKey,
             calendars: cfg.providers?.apple?.calendars || [],
           },
@@ -86,8 +86,7 @@ function handleSyncURLToggle() {
       try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Cloud sync enabled (Google).' })) } catch {}
       setTimeout(() => { try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Cloud sync enabled (Google).' })) } catch {} }, 500)
     } else if (sync === 'off') {
-      const next = { ...cfg, enabled: false }
-      writeSyncConfig(next)
+      writeSyncConfig({ ...cfg, enabled: false })
       url.searchParams.delete('sync')
       window.history.replaceState({}, '', url.toString())
       try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Cloud sync disabled.' })) } catch {}
@@ -100,6 +99,7 @@ function handleSyncURLToggle() {
 
 function bootstrapSync() {
   handleSyncURLToggle()
+  // Start one run immediately and then the background loop
   maybeRunSync()
   startSyncLoop()
 }
@@ -112,24 +112,23 @@ async function startApp() {
     console.warn('OAuth redirect handling failed:', e)
   }
 
+  // If we’re still on /oauth2/callback for any reason, move to a real route
   if (location.pathname === '/oauth2/callback') {
     history.replaceState({}, '', '/settings')
   }
 
-  // Wire the Settings card’s Connect button to your oauth module
+  // Wire the Google connect button to your oauth module (if exported)
   window.addEventListener('fc:google-oauth-start', (ev: Event) => {
     const ce = ev as CustomEvent<{ redirect?: string }>
     const redirect = ce?.detail?.redirect || '/settings'
-    const fn = (GoogleOAuthMod as any).startGoogleOAuth
+    const fn = (GoogleOAuthMod as any).startGoogleOAuth || (GoogleOAuthMod as any).beginAuth
     if (typeof fn === 'function') {
-      try {
-        fn({ redirect })
-      } catch (e) {
-        console.warn('startGoogleOAuth failed:', e)
+      try { fn({ redirect }) } catch (e) {
+        console.warn('startGoogleOAuth/beginAuth failed:', e)
         alert('Could not start Google sign-in.')
       }
     } else {
-      // Fallback: older deployments might have used a server route
+      // Fallback to server route if present
       try {
         const url = new URL('/oauth2/start', window.location.origin)
         url.searchParams.set('provider', 'google')
@@ -141,14 +140,7 @@ async function startApp() {
     }
   })
 
-  // ✅ Register LocalStore so the sync engine can read/write events
-  try {
-    registerLocalStore(getLocalStore())
-  } catch (e) {
-    console.warn('Failed to register LocalStore for sync:', e)
-  }
-
-  // migrations + sync
+  // Migrations + sync
   migrateSliceC()
   bootstrapSync()
 
