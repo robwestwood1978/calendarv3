@@ -1,60 +1,58 @@
-// frontend/src/sync/bootstrap.ts
-// Starts a small sync loop and exposes a manual kicker. Pulls & pushes.
-// Ticks on: page load, every 30s, tab re-focus, and when your data changes.
+// Small self-contained sync loop (no external runner). Ticks on visibility & interval.
 
-import { runOnce } from './runner'
+import { runSyncOnce } from './core'
+import { createGoogleAdapter } from './google'
+import { readSyncConfig } from './core'
+import { storeBridge } from './store-bridge'
 
-let timer: number | null = null
-let inFlight = false
+const TICK_MS = 30_000
 
-function traceOn() {
-  try { return localStorage.getItem('fc_sync_trace') === '1' } catch { return false }
-}
-
-async function tick(label: string) {
-  if (inFlight) return
-  inFlight = true
-  try {
-    if (traceOn()) console.debug('[sync] tick →', label)
-    const res = await runOnce()
-    if (traceOn()) console.debug('[sync] result:', res)
-    // Nudge the UI to refresh if anything landed
-    try { window.dispatchEvent(new Event('fc:events-changed')) } catch {}
-  } catch (e) {
-    console.warn('[sync] run failed:', e)
-  } finally {
-    inFlight = false
-  }
-}
+let timer: any = null
+let lastRun = 0
 
 export function maybeRunSync() {
-  // one eager pass on boot
-  tick('boot')
+  const cfg = readSyncConfig()
+  if (!cfg?.enabled) return
+  run().catch(e => console.warn('[sync] run failed:', e))
 }
 
 export function startSyncLoop() {
   stopSyncLoop()
-  // steady state every 30s (you can relax this later)
-  timer = window.setInterval(() => tick('interval'), 30_000)
-
-  // run when tab becomes visible
-  try {
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') tick('visible')
-    })
-  } catch {}
-
-  // run when your local store emits changes
-  try {
-    window.addEventListener('fc:events-changed', () => tick('events-changed'))
-  } catch {}
-
-  if (traceOn()) console.debug('[sync] loop started')
+  const onVis = () => { if (document.visibilityState === 'visible') maybeRunSync() }
+  document.addEventListener('visibilitychange', onVis)
+  timer = setInterval(() => maybeRunSync(), TICK_MS)
+  // kick
+  maybeRunSync()
 }
 
 export function stopSyncLoop() {
-  if (timer != null) {
-    clearInterval(timer)
-    timer = null
+  if (timer) clearInterval(timer)
+  timer = null
+}
+
+async function run() {
+  const now = Date.now()
+  if (now - lastRun < 2_000) return
+  lastRun = now
+
+  const cfg = readSyncConfig()
+  if (!cfg?.enabled) return
+
+  const adapters = []
+  if (cfg.providers?.google?.enabled) {
+    adapters.push(createGoogleAdapter({
+      calendars: cfg.providers.google.calendars,
+      accountKey: cfg.providers.google.accountKey,
+    }))
   }
+  if (adapters.length === 0) return
+
+  if (localStorage.getItem('fc_sync_trace') === '1') console.log('[sync] run…', new Date().toISOString())
+
+  const res = await runSyncOnce({
+    adapters,
+    store: storeBridge,
+  })
+
+  if (localStorage.getItem('fc_sync_trace') === '1') console.log('[sync] done:', res)
 }
