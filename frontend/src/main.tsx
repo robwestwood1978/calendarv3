@@ -13,6 +13,9 @@ if (typeof window !== 'undefined') {
       localStorage.removeItem('fc_my_agenda_v1')
       localStorage.removeItem('fc_feature_flags_v1')
       localStorage.removeItem('fc_google_oauth_v1')
+      // optional but harmless if present:
+      localStorage.removeItem('fc_sync_tokens_v1')
+      localStorage.removeItem('fc_sync_journal_v1')
       alert('Local data cleared. Reloading…')
     } catch {}
     url.searchParams.delete('reset')
@@ -41,8 +44,9 @@ import './styles.css'
 import Toaster from './components/Toaster'
 
 /* ===== Slice D: Sync bootstrap ===== */
-import { startSyncLoop, maybeRunSync } from './sync/bootstrap'
+import { startSyncLoop, maybeRunSync, registerLocalStore } from './sync/bootstrap'
 import { readSyncConfig, writeSyncConfig } from './sync/core'
+import { getLocalStore } from './sync/localStore'   // ⬅️ NEW
 
 /* ===== Handle Google OAuth redirect on boot ===== */
 import { maybeHandleRedirect } from './google/oauth'
@@ -112,7 +116,7 @@ async function startApp() {
     history.replaceState({}, '', '/settings')
   }
 
-  // NEW: wire the card’s connect button to your oauth module
+  // Wire the Settings card’s Connect button to your oauth module
   window.addEventListener('fc:google-oauth-start', (ev: Event) => {
     const ce = ev as CustomEvent<{ redirect?: string }>
     const redirect = ce?.detail?.redirect || '/settings'
@@ -136,6 +140,13 @@ async function startApp() {
       }
     }
   })
+
+  // ✅ Register LocalStore so the sync engine can read/write events
+  try {
+    registerLocalStore(getLocalStore())
+  } catch (e) {
+    console.warn('Failed to register LocalStore for sync:', e)
+  }
 
   // migrations + sync
   migrateSliceC()
