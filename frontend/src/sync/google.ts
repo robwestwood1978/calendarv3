@@ -1,5 +1,5 @@
 // frontend/src/sync/google.ts
-// Google Calendar adapter: incremental pull (instances) + real push (create/update/delete)
+// Google Calendar adapter: incremental pull (expanded instances) + push (create/update/delete)
 
 import { ProviderAdapter, RemoteDelta, PushIntent, PushResult, LocalEvent } from './types'
 import { getAccessToken } from '../google/oauth'
@@ -60,7 +60,7 @@ function mapGoogleToLocal(g: GoogleEvent) {
     : undefined
 
   return {
-    id: g.id, // instance id (unique per occurrence)
+    id: g.id, // instance id (unique per occurrence when singleEvents=true)
     title: g.summary || '(No title)',
     start: startISO,
     end: endISO,
@@ -94,72 +94,79 @@ async function gfetchJSON<T = any>(path: string, params: Record<string, string>)
   return res.json()
 }
 
-async function gfetchBody<T = any>(method: 'POST' | 'PATCH' | 'DELETE', path: string, body?: any): Promise<T> {
+async function gfetchBody<T = any>(method: 'POST' | 'PATCH' | 'DELETE', path: string, body?: any, etag?: string): Promise<T> {
   const token = await getAccessToken()
   if (!token) throw new Error('401')
   const url = new URL(`https://www.googleapis.com/calendar/v3${path}`)
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    'Content-Type': 'application/json',
+  }
+  // Use If-Match when updating to avoid stomping concurrent edits
+  if (method === 'PATCH' && etag) headers['If-Match'] = etag
+
   const res = await fetch(url.toString(), {
     method,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   })
-  if (res.status === 412) throw new Error('412') // Precondition failed (etag)
+
+  // 412 → ETag mismatch; let caller decide (we’ll treat as soft failure)
+  if (res.status === 412) throw new Error('412:Precondition failed (etag mismatch)')
   if (!res.ok) {
     const text = await res.text().catch(() => '')
     throw new Error(`${res.status}:${text}`)
   }
-  // some endpoints return 204 no content
   try { return (await res.json()) as T } catch { return undefined as any }
 }
 
-/** detect an all-day by “full-day span” and midnight alignment */
+/** detect an all-day by “full-day span” and midnight alignment in UTC */
 function isAllDayLocal(ev: LocalEvent): boolean {
   try {
     const s = new Date(ev.start)
     const e = new Date(ev.end)
     if (isNaN(+s) || isNaN(+e)) return !!ev.allDay
-    const dur = e.getTime() - s.getTime()
-    const oneDay = 24 * 60 * 60 * 1000
-    const startsMidnight = s.getUTCHours() === 0 && s.getUTCMinutes() === 0 && s.getUTCSeconds() === 0
-    // tolerate either classic inclusive (23:59:59.999) or exclusive midnight end-1ms
-    const endsMidnightMinus = (e.getUTCHours() === 23 && e.getUTCMinutes() === 59) || (e.getUTCHours() === 0 && dur % oneDay === 0)
-    return ev.allDay || (startsMidnight && endsMidnightMinus)
-  } catch {
-    return !!ev.allDay
-  }
+    const startsMidnightUTC = s.getUTCHours() === 0 && s.getUTCMinutes() === 0 && s.getUTCSeconds() === 0
+    const endsAtEndOfDayUTC = (e.getUTCHours() === 23 && e.getUTCMinutes() === 59) ||
+                              (e.getUTCHours() === 23 && e.getUTCMinutes() === 59 && e.getUTCSeconds() === 59)
+    const isFlagged = !!ev.allDay
+    return isFlagged || (startsMidnightUTC && endsAtEndOfDayUTC)
+  } catch { return !!ev.allDay }
 }
 
+/** Build Google API event body from a LocalEvent */
 function toGoogleBody(ev: LocalEvent, tz?: string) {
+  // Validate dates once; skip pushing malformed events rather than throwing
+  const sNum = Date.parse(ev.start as any)
+  const eNum = Date.parse(ev.end as any)
+  if (!isFinite(sNum) || !isFinite(eNum)) {
+    throw new RangeError('Invalid Date')
+  }
+
   const allDay = isAllDayLocal(ev)
-  const s = new Date(ev.start)
-  const e = new Date(ev.end)
-  if (isNaN(+s) || isNaN(+e)) throw new RangeError('Invalid Date')
   if (allDay) {
-    // Convert inclusive end → exclusive date
-    // The "end date" in Google is the day AFTER the last full day
-    const endExclusive = new Date(e.getTime() + 1) // if already exclusive midnight-1ms, +1ms lands on midnight
-    const endDate = new Date(Date.UTC(endExclusive.getUTCFullYear(), endExclusive.getUTCMonth(), endExclusive.getUTCDate()))
-    const startDate = new Date(Date.UTC(s.getUTCFullYear(), s.getUTCMonth(), s.getUTCDate()))
-    const pad = (n: number) => String(n).padStart(2, '0')
-    const dateStr = (d: Date) => `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`
+    // Inclusive end (…23:59:59.999) → Google exclusive end date (next day)
+    const s = new Date(sNum)
+    const e = new Date(eNum)
+    const endExclusiveUTC = new Date(e.getTime() + 1) // +1ms pushes to next midnight boundary in UTC
+    const startDate = `${s.getUTCFullYear()}-${String(s.getUTCMonth()+1).padStart(2,'0')}-${String(s.getUTCDate()).padStart(2,'0')}`
+    const endDate   = `${endExclusiveUTC.getUTCFullYear()}-${String(endExclusiveUTC.getUTCMonth()+1).padStart(2,'0')}-${String(endExclusiveUTC.getUTCDate()).padStart(2,'0')}`
     return {
       summary: ev.title || '(No title)',
       description: ev.notes || '',
       location: ev.location || undefined,
-      start: { date: dateStr(startDate) },
-      end: { date: dateStr(endDate) },
+      start: { date: startDate },
+      end:   { date: endDate   },
     }
-  } else {
-    return {
-      summary: ev.title || '(No title)',
-      description: ev.notes || '',
-      location: ev.location || undefined,
-      start: { dateTime: new Date(ev.start).toISOString(), timeZone: tz || undefined },
-      end: { dateTime: new Date(ev.end).toISOString(), timeZone: tz || undefined },
-    }
+  }
+
+  // Timed
+  return {
+    summary: ev.title || '(No title)',
+    description: ev.notes || '',
+    location: ev.location || undefined,
+    start: { dateTime: new Date(sNum).toISOString(), ...(tz ? { timeZone: tz } : {}) },
+    end:   { dateTime: new Date(eNum).toISOString(), ...(tz ? { timeZone: tz } : {}) },
   }
 }
 
@@ -169,6 +176,7 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
   return {
     provider: 'google',
 
+    /** PULL: windowed incremental w/ syncToken reuse (instances only) */
     async pull({ sinceToken, rangeStartISO, rangeEndISO }) {
       const events: RemoteDelta[] = []
       let nextSyncToken: string | null = null
@@ -184,9 +192,11 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
             singleEvents: 'true',
           }
           if (useSyncToken && sinceToken) {
+            // IMPORTANT: no orderBy when using syncToken
             params.syncToken = sinceToken
           } else {
-            params.orderBy = 'startTime' // allowed only without syncToken
+            // Only in window mode; ordering allowed here
+            params.orderBy = 'startTime'
             // normalize to RFC3339 and ensure timeMax > timeMin
             const tmin = new Date(rangeStartISO).toISOString()
             const tmax0 = new Date(rangeEndISO).toISOString()
@@ -218,6 +228,7 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
 
           const items = Array.isArray(data.items) ? data.items : []
           for (const g of items) {
+            // Skip series masters; singleEvents=true returns instances we want
             const isMaster = Array.isArray(g.recurrence) && g.recurrence.length > 0 && !g.originalStartTime
             if (isMaster) continue
 
@@ -252,38 +263,46 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
       return { token: nextSyncToken || sinceToken || null, events }
     },
 
-    // ============== PUSH (create/update/delete) ==============
+    /** PUSH: create/update/delete */
     async push(intents: PushIntent[]) {
       const results: PushResult[] = []
       if (!intents || intents.length === 0) return results
 
-      // We’ll act only on entries that are either:
-      //  - already bound to Google (_remote has provider "google"), or
-      //  - clearly local/unbound (no _remote at all) — we create on first calendar
       for (const it of intents) {
         const ev = it.local as LocalEvent
-        const remote = Array.isArray((ev as any)._remote) ? (ev as any)._remote as Array<any> : []
-        const boundGoogle = remote.find(r => r?.provider === 'google')
+        if (!ev || !ev.start || !ev.end) {
+          results.push({ ok: false, action: it.action, localId: ev?.id || '', error: 'Missing start/end' })
+          continue
+        }
+
+        const remoteArr = Array.isArray((ev as any)._remote) ? (ev as any)._remote as Array<any> : []
+        const boundGoogle = remoteArr.find(r => r?.provider === 'google')
         const calendarId = (boundGoogle?.calendarId) || (calendars[0] || 'primary')
 
         try {
           if (it.action === 'delete') {
             if (!boundGoogle?.externalId) {
-              // nothing to do; treat as success to drain the journal
-              results.push({ ok: true, action: it.action, localId: ev.id })
+              // nothing to delete in Google; succeed to clear journal
+              results.push({ ok: true, action: 'delete', localId: ev.id })
               continue
             }
-            await gfetchBody('DELETE', `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(boundGoogle.externalId)}`)
+            await gfetchBody('DELETE',
+              `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(boundGoogle.externalId)}`
+            )
             results.push({ ok: true, action: 'delete', localId: ev.id })
             continue
           }
 
-          // create or update payload
+          // Build body; throws RangeError on invalid dates
           const body = toGoogleBody(ev, (ev as any).timezone)
 
           if (!boundGoogle) {
-            // CREATE
-            const created = await gfetchBody<GoogleEvent>('POST', `/calendars/${encodeURIComponent(calendarId)}/events`, body)
+            // CREATE for unbound local event
+            const created = await gfetchBody<GoogleEvent>(
+              'POST',
+              `/calendars/${encodeURIComponent(calendarId)}/events`,
+              body
+            )
             results.push({
               ok: true,
               action: 'create',
@@ -296,9 +315,13 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
               },
             })
           } else {
-            // UPDATE (use etag for optimistic concurrency if we have it)
-            const path = `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(boundGoogle.externalId)}`
-            const updated = await gfetchBody<GoogleEvent>('PATCH', path, body)
+            // UPDATE existing google-bound event (optimistic with etag)
+            const updated = await gfetchBody<GoogleEvent>(
+              'PATCH',
+              `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(boundGoogle.externalId)}`,
+              body,
+              boundGoogle.etag
+            )
             results.push({
               ok: true,
               action: 'update',
