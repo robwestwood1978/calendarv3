@@ -235,3 +235,4 @@ export async function maybeHandleRedirect(): Promise<boolean> {
 
   return true
 }
+export { beginAuth as startGoogleOAuth }
