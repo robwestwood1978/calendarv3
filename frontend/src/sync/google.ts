@@ -1,12 +1,13 @@
-// frontend/src/sync/google.ts
-// Incremental Google adapter (instances only; all-day mapping + robust 400/409/410/412 handling)
+// Incremental Google adapter (pull instances, push create/update/delete)
+// Works with your existing oauth.ts (uses getAccessToken). Safe mapping for all-day.
 
 import { ProviderAdapter, RemoteDelta, PushIntent, PushResult } from './types'
 import { getAccessToken } from '../google/oauth'
+import { readSyncConfig } from './core'
 
 type GoogleEvent = {
   id: string
-  status?: string
+  status?: 'confirmed' | 'cancelled' | 'tentative'
   summary?: string
   description?: string
   location?: string
@@ -27,7 +28,7 @@ type ListResp = {
   nextSyncToken?: string
 }
 
-function toISO(z: string | undefined) {
+function toISO(z?: string | null) {
   if (!z) return undefined
   const d = new Date(z)
   return isNaN(+d) ? undefined : d.toISOString()
@@ -40,7 +41,6 @@ function mapGoogleToLocal(g: GoogleEvent) {
     ? toISO(`${g.start!.date}T00:00:00Z`)
     : toISO(g.start?.dateTime)
 
-  // Google all-day end is exclusive → back up 1ms so it renders “today 23:59:59.999”
   const endExclusiveISO = isAllDay
     ? toISO(`${g.end!.date}T00:00:00Z`)
     : toISO(g.end?.dateTime)
@@ -59,7 +59,7 @@ function mapGoogleToLocal(g: GoogleEvent) {
     : undefined
 
   return {
-    id: g.id, // instance id (unique per occurrence when singleEvents=true)
+    id: g.id,
     title: g.summary || '(No title)',
     start: startISO,
     end: endISO,
@@ -68,7 +68,6 @@ function mapGoogleToLocal(g: GoogleEvent) {
     notes: g.description || undefined,
     attendees,
     rrule: rrule ? rrule.replace(/^RRULE:/i, '') : undefined,
-    colour: undefined,
     _remote: [{
       provider: 'google',
       calendarId: '', // filled by caller
@@ -78,128 +77,214 @@ function mapGoogleToLocal(g: GoogleEvent) {
   }
 }
 
-async function gfetch(path: string, params: Record<string, string>): Promise<ListResp> {
+async function gfetch(path: string, params?: Record<string, string>, init?: RequestInit) {
   const token = await getAccessToken()
+  if (!token) throw new Error('NO_TOKEN')
   const url = new URL(`https://www.googleapis.com/calendar/v3${path}`)
-  Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v))
-  const res = await fetch(url.toString(), { headers: { Authorization: `Bearer ${token}` } })
-
-  // Explicit status mapping we handle above the callsite
-  if ([400, 401, 409, 410, 412, 429].includes(res.status)) {
-    throw new Error(String(res.status))
-  }
-  if (!res.ok) throw new Error(`${res.status}`)
-  return res.json()
+  if (params) Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v))
+  const res = await fetch(url.toString(), {
+    ...init,
+    headers: {
+      ...(init?.headers || {}),
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+  })
+  if (res.status === 401) throw new Error('401')
+  if (res.status === 409) throw new Error('409')
+  if (res.status === 429) throw new Error('429')
+  if (res.status === 410) throw new Error('410')
+  if (res.status === 400) throw new Error('400')
+  if (!res.ok) throw new Error(String(res.status))
+  return res
 }
 
-export function createGoogleAdapter(opts: { accountKey?: string; calendars?: string[] }): ProviderAdapter {
-  const calendars = opts.calendars && opts.calendars.length ? opts.calendars : ['primary']
+export function createGoogleAdapter(opts?: { accountKey?: string; calendars?: string[] }): ProviderAdapter {
+  // calendar selection comes from sync config but allow override via opts
+  function activeCalendar(): string {
+    const cfg = readSyncConfig()
+    const pick = opts?.calendars?.[0]
+      || cfg?.providers?.google?.calendars?.[0]
+      || 'primary'
+    return pick || 'primary'
+  }
 
   return {
     provider: 'google',
 
     async pull({ sinceToken, rangeStartISO, rangeEndISO }) {
+      const calId = activeCalendar()
       const events: RemoteDelta[] = []
-      let nextSyncToken: string | null = null
+      let nextSyncToken: string | null = sinceToken || null
 
-      for (const calId of calendars) {
-        let pageToken: string | undefined
-        let useSyncToken = !!sinceToken
+      let pageToken: string | undefined
+      let useSyncToken = !!sinceToken
 
-        while (true) {
-          const params: Record<string, string> = {
-            maxResults: '2500',
-            showDeleted: 'true',
-            singleEvents: 'true', // Expand instances
-          }
+      while (true) {
+        const params: Record<string, string> = {
+          maxResults: '2500',
+          showDeleted: 'true',
+          singleEvents: 'true',
+        }
 
-          if (useSyncToken && sinceToken) {
-            // IMPORTANT: no orderBy while using syncToken
-            params.syncToken = sinceToken
-          } else {
-            // Time window mode — ordering is allowed here
-            params.orderBy = 'startTime'
-            const tmin = new Date(rangeStartISO).toISOString()
-            const tmax0 = new Date(rangeEndISO).toISOString()
-            const tmax = (new Date(tmax0).getTime() <= new Date(tmin).getTime())
-              ? new Date(new Date(tmin).getTime() + 60_000).toISOString()
-              : tmax0
-            params.timeMin = tmin
-            params.timeMax = tmax
-          }
+        if (useSyncToken && nextSyncToken) {
+          params.syncToken = nextSyncToken
+        } else {
+          params.orderBy = 'startTime'
+          const tmin = new Date(rangeStartISO).toISOString()
+          const tmax0 = new Date(rangeEndISO).toISOString()
+          const tmax = (new Date(tmax0).getTime() <= new Date(tmin).getTime())
+            ? new Date(new Date(tmin).getTime() + 60_000).toISOString()
+            : tmax0
+          params.timeMin = tmin
+          params.timeMax = tmax
+        }
+        if (pageToken) params.pageToken = pageToken
 
-          if (pageToken) params.pageToken = pageToken
-
-          let data: ListResp
-          try {
-            data = await gfetch(`/calendars/${encodeURIComponent(calId)}/events`, params)
-          } catch (e: any) {
-            const code = e?.message
-            // Token invalid/expired or ordering mismatch → restart with window
-            if (code === '409' || code === '410' || code === '400') {
-              useSyncToken = false
-              pageToken = undefined
-              continue
-            }
-            if (code === '429') {
-              await new Promise(r => setTimeout(r, 1000))
-              continue
-            }
-            // 401 bubbles (refresh handled in getAccessToken)
-            throw e
-          }
-
-          const items = Array.isArray(data.items) ? data.items : []
-          for (const g of items) {
-            // Skip series masters; we only want expanded instances
-            const isMaster = Array.isArray(g.recurrence) && g.recurrence.length > 0 && !g.originalStartTime
-            if (isMaster) continue
-
-            if (g.status === 'cancelled') {
-              events.push({
-                operation: 'delete',
-                calendarId: calId,
-                externalId: g.id,
-              })
-              continue
-            }
-
-            const payload = mapGoogleToLocal(g)
-            if (!payload) continue
-            if (payload._remote?.[0]) payload._remote[0].calendarId = calId
-
-            events.push({
-              operation: 'upsert',
-              calendarId: calId,
-              externalId: g.id,
-              etag: g.etag,
-              payload,
-            })
-          }
-
-          if (data.nextPageToken) {
-            pageToken = data.nextPageToken
+        let data: ListResp
+        try {
+          const res = await gfetch(`/calendars/${encodeURIComponent(calId)}/events`, params)
+          data = await res.json()
+        } catch (e: any) {
+          const code = e?.message || ''
+          if (code === '409' || code === '410' || code === '400') {
+            // invalid sync token → fall back to window pull
+            useSyncToken = false
+            pageToken = undefined
+            nextSyncToken = null
             continue
           }
-          nextSyncToken = data.nextSyncToken || nextSyncToken
-          break
+          if (code === '429') { await new Promise(r => setTimeout(r, 800)); continue }
+          throw e
         }
+
+        const items = Array.isArray(data.items) ? data.items : []
+        for (const g of items) {
+          const isMaster = Array.isArray(g.recurrence) && g.recurrence.length > 0 && !g.originalStartTime
+          if (isMaster) continue
+
+          if (g.status === 'cancelled') {
+            events.push({ operation: 'delete', calendarId: calId, externalId: g.id })
+            continue
+          }
+
+          const payload = mapGoogleToLocal(g)
+          if (!payload) continue
+          if (payload._remote?.[0]) payload._remote[0].calendarId = calId
+
+          events.push({
+            operation: 'upsert',
+            calendarId: calId,
+            externalId: g.id,
+            etag: g.etag,
+            payload,
+          })
+        }
+
+        if (data.nextPageToken) { pageToken = data.nextPageToken; continue }
+        nextSyncToken = data.nextSyncToken || nextSyncToken
+        break
       }
 
       return { token: nextSyncToken || sinceToken || null, events }
     },
 
-    // Safe mode push: the app is source of truth for metadata.
-    // We treat 403/409/412 as "already applied / precondition changed" and success.
+    // Minimal write-through. We only touch the currently-selected calendar.
     async push(intents: PushIntent[]) {
-      // If your build does real network writes here, keep them.
-      // Otherwise this is a passthrough acknowledging local changes.
-      const results: PushResult[] = intents.map(i => ({
-        ok: true,
-        action: i.action,
-        localId: i.local.id,
-        bound: i.target ?? undefined,
-      }))
+      const calId = activeCalendar()
+      const results: PushResult[] = []
+
+      const mkBody = (ev: any) => {
+        const isAllDay = !!ev.allDay || (ev.start && ev.end && ev.start.endsWith('T00:00:00.000Z') && ev.end.endsWith('T23:59:59.999Z'))
+        if (isAllDay) {
+          // Google all-day end is exclusive (date)
+          const d0 = new Date(ev.start)
+          const d1 = new Date(ev.end)
+          const nextDay = new Date(d1.getTime() + 1) // because our end is inclusive
+          const sDate = d0.toISOString().slice(0, 10)
+          const eDate = nextDay.toISOString().slice(0, 10)
+          return {
+            summary: ev.title || '',
+            description: ev.notes || undefined,
+            location: ev.location || undefined,
+            start: { date: sDate },
+            end: { date: eDate },
+          }
+        } else {
+          return {
+            summary: ev.title || '',
+            description: ev.notes || undefined,
+            location: ev.location || undefined,
+            start: { dateTime: new Date(ev.start).toISOString() },
+            end: { dateTime: new Date(ev.end).toISOString() },
+          }
+        }
+      }
+
+      for (const i of intents) {
+        try {
+          const bound = i.target || (Array.isArray(i.local?._remote) ? i.local._remote.find((r: any)=>r.provider==='google') : null)
+          if (i.action === 'create') {
+            const body = mkBody(i.local)
+            const res = await gfetch(`/calendars/${encodeURIComponent(calId)}/events`, undefined, {
+              method: 'POST',
+              body: JSON.stringify(body),
+            })
+            const g: GoogleEvent = await res.json()
+            results.push({
+              ok: true,
+              action: i.action,
+              localId: i.local.id,
+              bound: { provider: 'google', calendarId: calId, externalId: g.id, etag: g.etag },
+            })
+          } else if (i.action === 'update') {
+            if (!bound?.externalId) {
+              // no remote binding yet → create instead
+              const body = mkBody(i.local)
+              const res = await gfetch(`/calendars/${encodeURIComponent(calId)}/events`, undefined, {
+                method: 'POST',
+                body: JSON.stringify(body),
+              })
+              const g: GoogleEvent = await res.json()
+              results.push({
+                ok: true,
+                action: 'create',
+                localId: i.local.id,
+                bound: { provider: 'google', calendarId: calId, externalId: g.id, etag: g.etag },
+              })
+              continue
+            }
+            const body = mkBody(i.local)
+            const res = await gfetch(
+              `/calendars/${encodeURIComponent(calId)}/events/${encodeURIComponent(bound.externalId)}`,
+              undefined,
+              { method: 'PATCH', body: JSON.stringify(body) }
+            )
+            const g: GoogleEvent = await res.json()
+            results.push({
+              ok: true,
+              action: i.action,
+              localId: i.local.id,
+              bound: { provider: 'google', calendarId: calId, externalId: g.id, etag: g.etag },
+            })
+          } else if (i.action === 'delete') {
+            if (bound?.externalId) {
+              await gfetch(
+                `/calendars/${encodeURIComponent(calId)}/events/${encodeURIComponent(bound.externalId)}`,
+                undefined,
+                { method: 'DELETE' }
+              )
+            }
+            results.push({ ok: true, action: i.action, localId: i.local.id })
+          } else {
+            results.push({ ok: true, action: i.action, localId: i.local.id })
+          }
+        } catch (e) {
+          console.warn('[google.push] failed', e)
+          results.push({ ok: false, action: i.action, localId: i.local.id, error: String(e) })
+        }
+      }
+
       return results
     },
   }
