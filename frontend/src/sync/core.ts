@@ -1,6 +1,5 @@
 // frontend/src/sync/core.ts
-// Unified sync engine: windowed pull, journal-driven push, conflict policy.
-// Push is driven directly from journal snapshots (no re-lookup by time).
+// Unified sync engine: windowed pull, journal-driven push, conflict policy (safe).
 
 import { DateTime } from 'luxon'
 import { getKeys, readJSON, writeJSON } from './storage'
@@ -44,6 +43,16 @@ export type LocalStore = {
   rebind(localId: string, boundRef: { provider: string; calendarId: string; externalId: string; etag?: string }): void
 }
 
+function isISO(x: any): x is string {
+  if (typeof x !== 'string') return false
+  const d = new Date(x)
+  return !isNaN(+d)
+}
+
+function validLocal(ev: any): ev is LocalEvent {
+  return ev && typeof ev === 'object' && typeof ev.id === 'string' && isISO(ev.start) && isISO(ev.end)
+}
+
 export async function runSyncOnce(params: {
   adapters: ProviderAdapter[]
   store: LocalStore
@@ -58,90 +67,93 @@ export async function runSyncOnce(params: {
 
   const tokens = readTokens()
 
-  console.log('[sync] run…', now.toISO())
-
-  // 1) PULL phase — provider deltas into local
+  // 1) PULL — provider deltas -> local
   for (const ad of params.adapters) {
     const t = tokens[ad.provider]?.sinceToken ?? null
     try {
       const res = await ad.pull({ sinceToken: t, rangeStartISO: start, rangeEndISO: end })
+
       const upserts: LocalEvent[] = []
-      const deletes: string[] = []
+      // const deletes: string[] = []   // if you resolve deletes to local ids, call applyDeletes
 
       for (const d of res.events) {
         if (d.operation === 'delete') {
-          // OPTIONAL: resolve local id by external binding if you track that mapping
-          // deletes.push(localId)
+          // left to your store to map remote → local and delete
+          continue
         } else if (d.payload) {
           upserts.push({ ...(d.payload as any) })
         }
       }
 
       if (upserts.length) params.store.upsertMany(upserts)
-      if (deletes.length) params.store.applyDeletes(deletes)
 
       tokens[ad.provider] = { sinceToken: res.token ?? null, lastRunISO: now.toISO()! }
       writeTokens(tokens)
     } catch (e: any) {
-      console.warn(`[sync] pull failed for ${ad.provider}:`, e)
+      console.warn(`[sync][pull] failed for ${ad.provider}`, e)
     }
   }
 
-  // 2) PUSH phase — drain local journal as push intents
+  // 2) PUSH — drain journal as push intents (use journal snapshots, not listRange)
   const batch = popBatch(50)
-  if (batch.length === 0) {
-    console.log('[sync] done:', { ok: true })
-    return { ok: true }
+  if (batch.length === 0) return { ok: true }
+
+  // Build intents once from journal
+  const intents: PushIntent[] = []
+  for (const j of batch) {
+    let local: any
+    if (j.action === 'delete') {
+      local = j.before || null
+    } else {
+      local = j.after || null
+    }
+    if (!validLocal(local)) {
+      console.warn('[sync][push] skip journal row with invalid local snapshot:', j)
+      continue
+    }
+    intents.push({ action: j.action, local })
   }
 
-  // Build intents *from the journal snapshots* (no listRange re-lookup)
-  const intents: PushIntent[] = batch.map(j => {
-    // For create/update the newest state is in j.after; for delete prefer j.before.
-    const snap = (j.after || j.before || {}) as Partial<LocalEvent>
-    const fallbackISO = new Date(j.at).toISOString()
-    const local: LocalEvent = {
-      id: j.eventId,
-      title: snap.title || '(No title)',
-      start: snap.start || fallbackISO,
-      end: snap.end || fallbackISO,
-      allDay: (snap as any).allDay,
-      location: snap.location,
-      notes: snap.notes,
-      attendees: (snap as any).attendees,
-      tags: (snap as any).tags,
-      colour: (snap as any).colour,
-      _remote: (snap as any)._remote, // preserve bindings so updates go to Google
-    } as any
-    return { action: j.action, local }
-  })
+  if (intents.length === 0) return { ok: true }
 
-  console.log('[sync] push intents:', intents.length)
-
-  // Send to each adapter (right now you only have google enabled)
+  let anyOk = false
   for (const ad of params.adapters) {
     try {
-      const results: PushResult[] = await ad.push(intents)
-      // Drop only entries whose corresponding result.ok is true (index-aligned)
-      const okJournalIds = results
-        .map((r, idx) => ({ r, j: batch[idx] }))
-        .filter(x => x.r && x.r.ok && x.j)
-        .map(x => x.j!.journalId)
+      console.log('[sync] push intents:', intents.length, '→', ad.provider)
+      const rs = await ad.push(intents)
+      const okIdx: number[] = []
+      rs.forEach((r, i) => { if (r.ok) okIdx.push(i) })
+      anyOk = anyOk || okIdx.length > 0
 
-      if (okJournalIds.length) dropEntries(okJournalIds)
+      // Drop by matching positions in the original 'batch' that were included in intents
+      // We need to align results to intents. Build a list of journalIds we can drop:
+      const dropIds: string[] = []
+      let intentCursor = 0
+      for (let bi = 0; bi < batch.length && intentCursor < intents.length; bi++) {
+        const j = batch[bi]
+        const intended = intents[intentCursor]
+        // match by eventId + action (good enough for journal rows in order)
+        if (j.eventId === intended.local.id && j.action === intended.action) {
+          // if corresponding result ok, drop this row
+          const wasOk = rs[intentCursor]?.ok
+          if (wasOk) dropIds.push(j.journalId)
+          intentCursor++
+        }
+      }
+      if (dropIds.length) dropEntries(dropIds)
 
-      // Apply bindings returned from adapter (e.g., new Google event id/etag)
-      for (const r of results) {
-        if (r.ok && r.bound && r.localId) {
+      // Apply new bindings (e.g., newly created externalId)
+      for (const r of rs) {
+        if (r.ok && r.bound) {
           params.store.rebind(r.localId, r.bound)
         }
       }
 
-      console.log('[sync] push success:', okJournalIds.length, 'of', results.length)
+      console.log('[sync] push success:', okIdx.length, 'of', rs.length)
     } catch (e) {
-      console.warn(`[sync] push failed for ${ad.provider}:`, e)
+      console.warn(`[sync][push] failed for ${ad.provider}`, e)
     }
   }
 
-  console.log('[sync] done:', { ok: true })
   return { ok: true }
 }
