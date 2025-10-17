@@ -1,12 +1,11 @@
-// Small self-contained sync loop (no external runner). Ticks on visibility & interval.
+// Sync loop runner. Adds the journalizer side-effect import so your journal is fed.
 
-import { runSyncOnce } from './core'
+import './journalizer'                       // <-- NEW: writes to your existing journal
+import { runSyncOnce, readSyncConfig } from './core'
 import { createGoogleAdapter } from './google'
-import { readSyncConfig } from './core'
-import { storeBridge } from './store-bridge'
+import { storeBridge } from './store-bridge' // your LocalStore impl
 
 const TICK_MS = 30_000
-
 let timer: any = null
 let lastRun = 0
 
@@ -18,21 +17,18 @@ export function maybeRunSync() {
 
 export function startSyncLoop() {
   stopSyncLoop()
-  const onVis = () => { if (document.visibilityState === 'visible') maybeRunSync() }
-  document.addEventListener('visibilitychange', onVis)
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') maybeRunSync()
+  })
   timer = setInterval(() => maybeRunSync(), TICK_MS)
-  // kick
   maybeRunSync()
 }
 
-export function stopSyncLoop() {
-  if (timer) clearInterval(timer)
-  timer = null
-}
+export function stopSyncLoop() { if (timer) clearInterval(timer); timer = null }
 
 async function run() {
   const now = Date.now()
-  if (now - lastRun < 2_000) return
+  if (now - lastRun < 2000) return
   lastRun = now
 
   const cfg = readSyncConfig()
@@ -48,11 +44,6 @@ async function run() {
   if (adapters.length === 0) return
 
   if (localStorage.getItem('fc_sync_trace') === '1') console.log('[sync] run…', new Date().toISOString())
-
-  const res = await runSyncOnce({
-    adapters,
-    store: storeBridge,
-  })
-
+  const res = await runSyncOnce({ adapters, store: storeBridge })
   if (localStorage.getItem('fc_sync_trace') === '1') console.log('[sync] done:', res)
 }
