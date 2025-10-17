@@ -1,4 +1,6 @@
+// frontend/src/sync/core.ts
 // Unified sync engine: windowed pull, journal-driven push, conflict policy.
+// (2025-10-17) — journal drain fix + clearer tracing.
 
 import { DateTime } from 'luxon'
 import { getKeys, readJSON, writeJSON } from './storage'
@@ -54,8 +56,6 @@ export async function runSyncOnce(params: {
   const start = now.startOf('day').toISO()!
   const end = now.plus({ weeks: cfg.windowWeeks }).endOf('day').toISO()!
 
-  console.log('[sync] run…', now.toISO())
-
   const tokens = readTokens()
 
   // 1) PULL phase — provider deltas into local
@@ -65,10 +65,14 @@ export async function runSyncOnce(params: {
       const res = await ad.pull({ sinceToken: t, rangeStartISO: start, rangeEndISO: end })
 
       const upserts: LocalEvent[] = []
-      // NOTE: deletes are left for binding-aware implementations; no-op here
+      // (Optional) collect deletes here if your store can resolve local ids by binding
+      // const deletes: string[] = []
 
       for (const d of res.events) {
-        if (d.operation === 'upsert' && d.payload) {
+        if (d.operation === 'delete') {
+          // left to store-level mapping if you keep remote bindings → applyDeletes([...])
+          continue
+        } else if (d.payload) {
           upserts.push({ ...(d.payload as any) })
         }
       }
@@ -78,71 +82,42 @@ export async function runSyncOnce(params: {
       tokens[ad.provider] = { sinceToken: res.token ?? null, lastRunISO: now.toISO()! }
       writeTokens(tokens)
     } catch (e: any) {
-      console.warn(`pull failed for ${ad.provider}`, e)
+      console.warn(`[sync] pull failed for ${ad.provider}`, e)
     }
   }
 
   // 2) PUSH phase — drain local journal as push intents
   const batch = popBatch(50)
-  if (batch.length === 0) {
-    console.log('[sync] done:', { ok: true })
-    return { ok: true }
-  }
+  if (batch.length === 0) return { ok: true }
 
-  // Build intents from journal snapshots in-order and keep a parallel journalId list
-  const intents: PushIntent[] = batch.map(j => {
-    // prefer "after" for create/update; "before" for delete
-    const snapshot: any =
-      j.action === 'delete' ? (j.before || {}) :
-      (j.after || j.before || {})
+  // Build intents once; adapter can ignore intents it can't handle
+  // (In a binding-aware flow you’d route by provider/target.)
+  const intents: PushIntent[] = batch.map(j => ({
+    action: j.action,
+    // Provide a minimal local stub; adapter can refetch as needed
+    local: params.store.listRange(j.at, j.at)[0] || { id: j.eventId, title: '', start: j.at, end: j.at } as any
+  }))
 
-    const local: LocalEvent = {
-      id: snapshot.id,
-      title: snapshot.title || '',
-      start: snapshot.start,
-      end: snapshot.end,
-      allDay: snapshot.allDay,
-      notes: snapshot.notes,
-      location: snapshot.location,
-      attendees: snapshot.attendees,
-      rrule: snapshot.rrule,
-      colour: snapshot.colour,
-      _remote: snapshot._remote, // keep any existing binding(s)
-    }
-
-    return { action: j.action, local }
-  })
-
-  console.log('[sync] push intents:', intents.length)
-
-  // Send to each provider; drop exactly the entries that succeeded by index
   for (const ad of params.adapters) {
     try {
       const rs: PushResult[] = await ad.push(intents)
 
-      // Map results back to the same position and collect journalIds that succeeded
-      const okJournalIds: string[] = []
-      rs.forEach((r, i) => {
-        if (r?.ok) {
-          const je = batch[i]
-          if (je?.journalId) okJournalIds.push(je.journalId)
-          // Apply new binding if the adapter returned it
-          if (r.bound && r.localId) {
-            params.store.rebind(r.localId, r.bound)
-          }
+      // === CRITICAL FIX: drain journal by zipping results to batch indices ===
+      const okIds: string[] = []
+      for (let i = 0; i < rs.length && i < batch.length; i++) {
+        const r = rs[i]
+        if (r && r.ok) okIds.push(batch[i].journalId)
+        if (r && r.ok && r.bound) {
+          // Persist the remote binding so the next push is PATCH not INSERT
+          try { params.store.rebind(r.localId, r.bound) } catch (e) { console.warn('[sync] rebind failed', e) }
         }
-      })
-
-      if (okJournalIds.length) {
-        dropEntries(okJournalIds)
       }
+      if (okIds.length) dropEntries(okIds)
 
-      console.log('[sync] push success:', okJournalIds.length, 'of', batch.length)
     } catch (e) {
-      console.warn(`push failed for ${ad.provider}`, e)
+      console.warn(`[sync] push failed for ${ad.provider}`, e)
     }
   }
 
-  console.log('[sync] done:', { ok: true })
   return { ok: true }
 }
