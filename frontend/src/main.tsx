@@ -40,6 +40,7 @@ import SignInDock from './components/SignInDock'
 import { AuthProvider } from './auth/AuthProvider'
 import { migrateSliceC } from './lib/migrateSliceC'
 import './styles.css'
+import './sync/diag-boot'
 
 /* === Global toaster so ?sync=on/off shows a message === */
 import Toaster from './components/Toaster'
