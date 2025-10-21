@@ -1,8 +1,9 @@
 // frontend/src/sync/google.ts
-// Google Calendar adapter: incremental pull (instances) + guarded push.
+// Google Calendar adapter with diagnostics.
 
 import { ProviderAdapter, RemoteDelta, PushIntent, PushResult, LocalEvent } from './types'
 import { getAccessToken } from '../google/oauth'
+import { diag } from './diag'
 
 type GoogleEvent = {
   id: string
@@ -33,7 +34,7 @@ function toISO(z: string | undefined) {
   return isNaN(+d) ? undefined : d.toISOString()
 }
 
-function mapGoogleToLocal(g: GoogleEvent) {
+function mapGoogleToLocal(g: GoogleEvent, calId: string) {
   const isAllDay = !!g.start?.date && !!g.end?.date
 
   const startISO = isAllDay
@@ -49,14 +50,6 @@ function mapGoogleToLocal(g: GoogleEvent) {
     ? new Date(new Date(endExclusiveISO).getTime() - 1).toISOString()
     : endExclusiveISO
 
-  const rrule = Array.isArray(g.recurrence)
-    ? g.recurrence.find(x => x.toUpperCase().startsWith('RRULE:'))
-    : undefined
-
-  const attendees = Array.isArray(g.attendees)
-    ? g.attendees.map(a => a?.email || a?.displayName || '').filter(Boolean)
-    : undefined
-
   return {
     id: g.id,
     title: g.summary || '(No title)',
@@ -65,12 +58,12 @@ function mapGoogleToLocal(g: GoogleEvent) {
     allDay: isAllDay || undefined,
     location: g.location || undefined,
     notes: g.description || undefined,
-    attendees,
-    rrule: rrule ? rrule.replace(/^RRULE:/i, '') : undefined,
+    attendees: Array.isArray(g.attendees) ? g.attendees.map(a => a?.email || a?.displayName || '').filter(Boolean) : undefined,
+    rrule: Array.isArray(g.recurrence) ? (g.recurrence.find(x => x.toUpperCase().startsWith('RRULE:')) || '').replace(/^RRULE:/i, '') || undefined : undefined,
     colour: undefined,
     _remote: [{
       provider: 'google',
-      calendarId: '', // filled by caller
+      calendarId: calId,
       externalId: g.id,
       etag: g.etag,
     }],
@@ -104,7 +97,7 @@ async function gfetchBody<T = any>(method: 'POST' | 'PATCH' | 'DELETE', path: st
     },
     body: body ? JSON.stringify(body) : undefined,
   })
-  if (res.status === 412) throw new Error('412') // Precondition failed (etag)
+  if (res.status === 412) throw new Error('412')
   if (!res.ok) {
     const text = await res.text().catch(() => '')
     throw new Error(`${res.status}:${text}`)
@@ -112,7 +105,6 @@ async function gfetchBody<T = any>(method: 'POST' | 'PATCH' | 'DELETE', path: st
   try { return (await res.json()) as T } catch { return undefined as any }
 }
 
-/** detect an all-day by full-day span + midnight alignment */
 function isAllDayLocal(ev: LocalEvent): boolean {
   try {
     const s = new Date(ev.start)
@@ -120,7 +112,6 @@ function isAllDayLocal(ev: LocalEvent): boolean {
     if (isNaN(+s) || isNaN(+e)) return !!ev.allDay
     const startsMid = s.getUTCHours() === 0 && s.getUTCMinutes() === 0 && s.getUTCSeconds() === 0
     const dur = e.getTime() - s.getTime()
-    // allow either inclusive 23:59:59.999 or exclusive midnight-1ms convention
     const endsMidOrSpan = (e.getUTCHours() === 23 && e.getUTCMinutes() >= 59) || (dur % (24*60*60*1000) === 0)
     return ev.allDay || (startsMid && endsMidOrSpan)
   } catch { return !!ev.allDay }
@@ -138,7 +129,6 @@ function toGoogleBody(ev: LocalEvent, tz?: string) {
   if (!sISO || !eISO) throw new RangeError('Invalid Date')
 
   if (allDay) {
-    // Convert inclusive end → exclusive date (day after)
     const e = new Date(eISO)
     const s = new Date(sISO)
     const endExclusive = new Date(e.getTime() + 1)
@@ -215,12 +205,21 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
 
             if (g.status === 'cancelled') {
               events.push({ operation: 'delete', calendarId: calId, externalId: g.id })
+              diag.pullDelete({ provider: 'google', calendarId: calId, externalId: g.id })
               continue
             }
 
-            const payload = mapGoogleToLocal(g)
+            const payload = mapGoogleToLocal(g, calId)
             if (!payload) continue
-            if (payload._remote && payload._remote[0]) payload._remote[0].calendarId = calId
+
+            diag.pullUpsert({
+              provider: 'google',
+              calendarId: calId,
+              externalId: g.id,
+              etag: g.etag,
+              localId: payload.id,
+              after: { id: payload.id, title: payload.title, start: payload.start, end: payload.end, allDay: payload.allDay }
+            })
 
             events.push({ operation: 'upsert', calendarId: calId, externalId: g.id, etag: g.etag, payload })
           }
@@ -248,24 +247,25 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
           if (it.action === 'delete') {
             if (!boundGoogle?.externalId) {
               results.push({ ok: true, action: it.action, localId: ev.id })
+              diag.pushDelete({ provider: 'google', calendarId, localId: ev.id, msg: 'no externalId — drain ok' })
               continue
             }
             await gfetchBody('DELETE', `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(boundGoogle.externalId)}`)
             results.push({ ok: true, action: 'delete', localId: ev.id })
+            diag.pushDelete({ provider: 'google', calendarId, localId: ev.id, externalId: boundGoogle.externalId })
             continue
           }
 
-          // CREATE / UPDATE
           let body: any
-          try {
-            body = toGoogleBody(ev, (ev as any).timezone)
-          } catch (bad) {
-            console.warn('[google.push] skip invalid local event:', ev, bad)
+          try { body = toGoogleBody(ev, (ev as any).timezone) }
+          catch (bad) {
+            diag.error({ provider: 'google', msg: 'invalid-local-dates', localId: ev.id, after: { start: ev.start, end: ev.end } })
             results.push({ ok: false, action: it.action, localId: ev.id, error: 'invalid-local-dates' })
             continue
           }
 
           if (!boundGoogle) {
+            diag.pushCreate({ provider: 'google', calendarId, localId: ev.id, body: { ...body, description: body?.description ? '…' : undefined } })
             const created = await gfetchBody<GoogleEvent>('POST', `/calendars/${encodeURIComponent(calendarId)}/events`, body)
             results.push({
               ok: true,
@@ -274,6 +274,7 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
               bound: { provider: 'google', calendarId, externalId: created.id, etag: created.etag },
             })
           } else {
+            diag.pushUpdate({ provider: 'google', calendarId, localId: ev.id, externalId: boundGoogle.externalId, body: { ...body, description: body?.description ? '…' : undefined } })
             const path = `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(boundGoogle.externalId)}`
             const updated = await gfetchBody<GoogleEvent>('PATCH', path, body)
             results.push({
@@ -284,8 +285,9 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
             })
           }
         } catch (err: any) {
-          console.warn('[google.push] failed', err)
-          results.push({ ok: false, action: it.action, localId: ev.id, error: String(err?.message || err) })
+          const emsg = String(err?.message || err)
+          diag.error({ provider: 'google', msg: `[push] ${emsg}`, localId: ev.id })
+          results.push({ ok: false, action: it.action, localId: ev.id, error: emsg })
         }
       }
 
