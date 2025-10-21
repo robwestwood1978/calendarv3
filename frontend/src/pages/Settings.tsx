@@ -1,25 +1,27 @@
 // frontend/src/pages/Settings.tsx
-// Your original page restored, plus a single Google section beneath Integrations.
-// Keeps Experiments + Account panel exactly like before.
+// Your original page restored, with a single Google section beneath Integrations,
+// and an optional SyncInspector (shown only when window.FC_TRACE is truthy).
 
 import React, { useEffect, useState } from 'react'
 import SettingsPage from '../components/SettingsPage'
 import { featureFlags } from '../state/featureFlags'
 import { useAuth } from '../auth/AuthProvider'
 import { useSettings } from '../state/settings'
-// Add at top of the file
+
+// Optional developer inspector (safe to keep imported; it only renders when FC_TRACE)
 import SyncInspector from '../components/dev/SyncInspector'
 
-// Existing panel you already have
+// Existing integrations panel (Apple/ICS)
 import IntegrationsPanel from '../components/integrations/IntegrationsPanel'
 
-// NEW: the small Google connect card
+// Small Google connect card
 import GoogleConnectCard from '../components/integrations/GoogleConnectCard'
 
 type Flags = ReturnType<typeof featureFlags.get>
 
 export default function Settings() {
   const [flags, setFlags] = useState<Flags>(() => featureFlags.get())
+
   useEffect(() => {
     const unsub = featureFlags.subscribe(() => setFlags(featureFlags.get()))
     return () => unsub()
@@ -28,6 +30,7 @@ export default function Settings() {
   function onToggleAuth(e: React.ChangeEvent<HTMLInputElement>) {
     const on = e.currentTarget.checked
     featureFlags.set({ authEnabled: on })
+    // keep behavior consistent with your previous code
     setTimeout(() => window.location.reload(), 0)
   }
 
@@ -56,10 +59,17 @@ export default function Settings() {
       {/* Integrations (Apple/ICS) — unchanged */}
       <IntegrationsPanel />
 
-      {/* Google Calendar — add once, below Integrations */}
+      {/* Google Calendar — added once, below Integrations */}
       <section style={card}>
         <GoogleConnectCard />
       </section>
+
+      {/* Optional: developer inspector (only if FC_TRACE is set) */}
+      {(window as any).FC_TRACE ? (
+        <div style={{ marginTop: 12 }}>
+          <SyncInspector />
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -113,23 +123,7 @@ function AccountPanel() {
     </section>
   )
 }
-export default function Settings() {
-  // ...your existing hooks/state/handlers...
 
-  return (
-    <div style={{ display: 'grid', gap: 16 }}>
-      {/* === your existing Settings content stays exactly as-is === */}
-      {/* SettingsPage, Experiments, AccountPanel, IntegrationsPanel, Google card, etc. */}
-
-      {/* Only show when trace mode is on */}
-      {(window as any).FC_TRACE ? (
-        <div style={{ marginTop: 12 }}>
-          <SyncInspector />
-        </div>
-      ) : null}
-    </div>
-  )
-}
 /* ---------------- styles (unchanged) ---------------- */
 
 const card: React.CSSProperties = {
@@ -152,7 +146,7 @@ const row: React.CSSProperties = {
 
 const box: React.CSSProperties = {
   background: '#f8fafc',
-  border: '1px solid #e5e7eb',
+  border: '1px solid '#e5e7eb',
   borderRadius: 8,
   padding: 12,
 }
