@@ -7,6 +7,8 @@ import SettingsPage from '../components/SettingsPage'
 import { featureFlags } from '../state/featureFlags'
 import { useAuth } from '../auth/AuthProvider'
 import { useSettings } from '../state/settings'
+// Add at top of the file
+import SyncInspector from '../components/dev/SyncInspector'
 
 // Existing panel you already have
 import IntegrationsPanel from '../components/integrations/IntegrationsPanel'
@@ -144,3 +146,7 @@ const hint: React.CSSProperties = {
   fontSize: 12,
   margin: '6px 0 0 0',
 }
+
+
+// Add near the end of the JSX tree:
+<SyncInspector />
