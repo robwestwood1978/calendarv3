@@ -113,7 +113,23 @@ function AccountPanel() {
     </section>
   )
 }
+export default function Settings() {
+  // ...your existing hooks/state/handlers...
 
+  return (
+    <div style={{ display: 'grid', gap: 16 }}>
+      {/* === your existing Settings content stays exactly as-is === */}
+      {/* SettingsPage, Experiments, AccountPanel, IntegrationsPanel, Google card, etc. */}
+
+      {/* Only show when trace mode is on */}
+      {(window as any).FC_TRACE ? (
+        <div style={{ marginTop: 12 }}>
+          <SyncInspector />
+        </div>
+      ) : null}
+    </div>
+  )
+}
 /* ---------------- styles (unchanged) ---------------- */
 
 const card: React.CSSProperties = {
@@ -146,7 +162,3 @@ const hint: React.CSSProperties = {
   fontSize: 12,
   margin: '6px 0 0 0',
 }
-
-
-// Add near the end of the JSX tree:
-<SyncInspector />
