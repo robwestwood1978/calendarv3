@@ -13,10 +13,6 @@ if (typeof window !== 'undefined') {
       localStorage.removeItem('fc_my_agenda_v1')
       localStorage.removeItem('fc_feature_flags_v1')
       localStorage.removeItem('fc_google_oauth_v1')
-      localStorage.removeItem('fc_sync_cfg_v1')
-      localStorage.removeItem('fc_sync_tokens_v1')
-      localStorage.removeItem('fc_journal_shadow_v1')
-      localStorage.removeItem('fc_sync_journal_v1')
       alert('Local data cleared. Reloading…')
     } catch {}
     url.searchParams.delete('reset')
@@ -40,7 +36,7 @@ import SignInDock from './components/SignInDock'
 import { AuthProvider } from './auth/AuthProvider'
 import { migrateSliceC } from './lib/migrateSliceC'
 import './styles.css'
-import './sync/diag-boot'
+import './dev/diagnostics' // ← NEW: safe diagnostics side-effect import
 
 /* === Global toaster so ?sync=on/off shows a message === */
 import Toaster from './components/Toaster'
@@ -52,7 +48,7 @@ import { readSyncConfig, writeSyncConfig } from './sync/core'
 /* ===== Handle Google OAuth redirect on boot ===== */
 import { maybeHandleRedirect } from './google/oauth'
 
-// Soft import to optionally call startGoogleOAuth if your module exports it
+// Soft import to support the Google button event bridge
 import * as GoogleOAuthMod from './google/oauth'
 
 function handleSyncURLToggle() {
@@ -74,7 +70,7 @@ function handleSyncURLToggle() {
             calendars: cfg.providers?.google?.calendars || [],
           },
           apple: {
-            enabled: cfg.providers?.apple?.enabled || false,
+            enabled: false,
             accountKey: cfg.providers?.apple?.accountKey,
             calendars: cfg.providers?.apple?.calendars || [],
           },
@@ -87,7 +83,8 @@ function handleSyncURLToggle() {
       try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Cloud sync enabled (Google).' })) } catch {}
       setTimeout(() => { try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Cloud sync enabled (Google).' })) } catch {} }, 500)
     } else if (sync === 'off') {
-      writeSyncConfig({ ...cfg, enabled: false })
+      const next = { ...cfg, enabled: false }
+      writeSyncConfig(next)
       url.searchParams.delete('sync')
       window.history.replaceState({}, '', url.toString())
       try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Cloud sync disabled.' })) } catch {}
@@ -100,7 +97,6 @@ function handleSyncURLToggle() {
 
 function bootstrapSync() {
   handleSyncURLToggle()
-  // Start one run immediately and then the background loop
   maybeRunSync()
   startSyncLoop()
 }
@@ -113,23 +109,24 @@ async function startApp() {
     console.warn('OAuth redirect handling failed:', e)
   }
 
-  // If we’re still on /oauth2/callback for any reason, move to a real route
   if (location.pathname === '/oauth2/callback') {
     history.replaceState({}, '', '/settings')
   }
 
-  // Wire the Google connect button to your oauth module (if exported)
+  // Bridge the Google connect button to your oauth module
   window.addEventListener('fc:google-oauth-start', (ev: Event) => {
     const ce = ev as CustomEvent<{ redirect?: string }>
     const redirect = ce?.detail?.redirect || '/settings'
-    const fn = (GoogleOAuthMod as any).startGoogleOAuth || (GoogleOAuthMod as any).beginAuth
+    const fn = (GoogleOAuthMod as any).startGoogleOAuth
     if (typeof fn === 'function') {
-      try { fn({ redirect }) } catch (e) {
-        console.warn('startGoogleOAuth/beginAuth failed:', e)
+      try {
+        fn({ redirect })
+      } catch (e) {
+        console.warn('startGoogleOAuth failed:', e)
         alert('Could not start Google sign-in.')
       }
     } else {
-      // Fallback to server route if present
+      // Fallback: server route if present
       try {
         const url = new URL('/oauth2/start', window.location.origin)
         url.searchParams.set('provider', 'google')
@@ -141,7 +138,7 @@ async function startApp() {
     }
   })
 
-  // Migrations + sync
+  // migrations + sync
   migrateSliceC()
   bootstrapSync()
 
