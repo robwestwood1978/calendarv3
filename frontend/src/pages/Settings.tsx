@@ -1,21 +1,28 @@
 // frontend/src/pages/Settings.tsx
-// Original page restored, with a single Google section beneath Integrations,
-// and an optional SyncInspector (renders only when window.FC_TRACE is truthy).
+// Your original page restored + one Google card + optional SyncInspector.
+// - Keeps SettingsPage, Experiments, Account panel, Integrations exactly as before.
+// - Adds <GoogleConnectCard/> in its own card.
+// - Shows <SyncInspector/> only when diagnostics are on.
 
 import React, { useEffect, useState } from 'react'
 import SettingsPage from '../components/SettingsPage'
 import { featureFlags } from '../state/featureFlags'
 import { useAuth } from '../auth/AuthProvider'
 import { useSettings } from '../state/settings'
+
+// Optional diagnostics panel (only renders if window.FC_TRACE is true)
 import SyncInspector from '../components/dev/SyncInspector'
+
+// Existing panel you already have
 import IntegrationsPanel from '../components/integrations/IntegrationsPanel'
+
+// Small Google connect card (non-destructive)
 import GoogleConnectCard from '../components/integrations/GoogleConnectCard'
 
 type Flags = ReturnType<typeof featureFlags.get>
 
 export default function Settings() {
   const [flags, setFlags] = useState<Flags>(() => featureFlags.get())
-
   useEffect(() => {
     const unsub = featureFlags.subscribe(() => setFlags(featureFlags.get()))
     return () => unsub()
@@ -52,16 +59,20 @@ export default function Settings() {
       {/* Integrations (Apple/ICS) — unchanged */}
       <IntegrationsPanel />
 
-      {/* Google Calendar — added once, below Integrations */}
+      {/* Google Calendar — single card, below Integrations */}
       <section style={card}>
         <GoogleConnectCard />
       </section>
 
-      {/* Optional dev inspector */}
+      {/* Diagnostics panel (optional) */}
       {(window as any).FC_TRACE ? (
-        <div style={{ marginTop: 12 }}>
-          <SyncInspector />
-        </div>
+        <section style={card}>
+          <h3 style={h3}>Diagnostics</h3>
+          <p style={hint}>Press <code>Ctrl/⌘ + Alt + S</code> to toggle diagnostics anywhere.</p>
+          <div style={{ marginTop: 8 }}>
+            <SyncInspector />
+          </div>
+        </section>
       ) : null}
     </div>
   )
@@ -139,7 +150,7 @@ const row: React.CSSProperties = {
 
 const box: React.CSSProperties = {
   background: '#f8fafc',
-  border: '1px solid #e5e7eb', // ← fixed string
+  border: '1px solid #e5e7eb',
   borderRadius: 8,
   padding: 12,
 }
