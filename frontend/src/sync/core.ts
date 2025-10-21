@@ -1,10 +1,11 @@
 // frontend/src/sync/core.ts
-// Unified sync engine: windowed pull, journal-driven push, conflict policy (safe).
+// Unified sync engine: windowed pull, journal-driven push, conflict policy (safe) + diagnostics.
 
 import { DateTime } from 'luxon'
 import { getKeys, readJSON, writeJSON } from './storage'
 import { ProviderAdapter, SyncConfig, LocalEvent, PushIntent, PushResult } from './types'
 import { popBatch, dropEntries } from './journal'
+import { diag } from './diag'
 
 const LS = getKeys()
 
@@ -66,6 +67,7 @@ export async function runSyncOnce(params: {
   const end = now.plus({ weeks: cfg.windowWeeks }).endOf('day').toISO()!
 
   const tokens = readTokens()
+  diag.log({ phase: 'note', kind: 'sync.start', msg: `window ${start} → ${end}` })
 
   // 1) PULL — provider deltas -> local
   for (const ad of params.adapters) {
@@ -74,31 +76,51 @@ export async function runSyncOnce(params: {
       const res = await ad.pull({ sinceToken: t, rangeStartISO: start, rangeEndISO: end })
 
       const upserts: LocalEvent[] = []
-      // const deletes: string[] = []   // if you resolve deletes to local ids, call applyDeletes
 
       for (const d of res.events) {
         if (d.operation === 'delete') {
+          diag.pullDelete({
+            provider: ad.provider as any,
+            calendarId: d.calendarId,
+            externalId: d.externalId,
+            etag: d.etag,
+          })
           // left to your store to map remote → local and delete
           continue
         } else if (d.payload) {
+          const p = d.payload as any
+          diag.pullUpsert({
+            provider: ad.provider as any,
+            calendarId: d.calendarId,
+            externalId: d.externalId,
+            etag: d.etag,
+            localId: p.id,
+            after: { id: p.id, title: p.title, start: p.start, end: p.end, allDay: p.allDay }
+          })
           upserts.push({ ...(d.payload as any) })
         }
       }
 
-      if (upserts.length) params.store.upsertMany(upserts)
+      if (upserts.length) {
+        params.store.upsertMany(upserts)
+        diag.reconcile({ msg: `upserts:${upserts.length}` })
+      }
 
       tokens[ad.provider] = { sinceToken: res.token ?? null, lastRunISO: now.toISO()! }
       writeTokens(tokens)
     } catch (e: any) {
       console.warn(`[sync][pull] failed for ${ad.provider}`, e)
+      diag.error({ provider: ad.provider as any, msg: `[pull] ${String(e?.message || e)}` })
     }
   }
 
   // 2) PUSH — drain journal as push intents (use journal snapshots, not listRange)
   const batch = popBatch(50)
-  if (batch.length === 0) return { ok: true }
+  if (batch.length === 0) {
+    diag.log({ phase: 'note', kind: 'sync.end', msg: 'no journal' })
+    return { ok: true }
+  }
 
-  // Build intents once from journal
   const intents: PushIntent[] = []
   for (const j of batch) {
     let local: any
@@ -109,51 +131,55 @@ export async function runSyncOnce(params: {
     }
     if (!validLocal(local)) {
       console.warn('[sync][push] skip journal row with invalid local snapshot:', j)
+      diag.error({ kind: 'journal.invalid', msg: 'invalid local snapshot', before: j.before, after: j.after })
       continue
     }
     intents.push({ action: j.action, local })
+    diag.journal({
+      action: j.action,
+      localId: local.id,
+      after: { id: local.id, title: local.title, start: local.start, end: local.end, allDay: local.allDay }
+    })
   }
 
-  if (intents.length === 0) return { ok: true }
+  if (intents.length === 0) {
+    diag.log({ phase: 'note', kind: 'sync.end', msg: 'journal had no valid rows' })
+    return { ok: true }
+  }
 
-  let anyOk = false
   for (const ad of params.adapters) {
     try {
-      console.log('[sync] push intents:', intents.length, '→', ad.provider)
       const rs = await ad.push(intents)
-      const okIdx: number[] = []
-      rs.forEach((r, i) => { if (r.ok) okIdx.push(i) })
-      anyOk = anyOk || okIdx.length > 0
 
-      // Drop by matching positions in the original 'batch' that were included in intents
-      // We need to align results to intents. Build a list of journalIds we can drop:
+      // success accounting & drop matched rows
       const dropIds: string[] = []
-      let intentCursor = 0
-      for (let bi = 0; bi < batch.length && intentCursor < intents.length; bi++) {
-        const j = batch[bi]
-        const intended = intents[intentCursor]
-        // match by eventId + action (good enough for journal rows in order)
-        if (j.eventId === intended.local.id && j.action === intended.action) {
-          // if corresponding result ok, drop this row
-          const wasOk = rs[intentCursor]?.ok
-          if (wasOk) dropIds.push(j.journalId)
-          intentCursor++
+      let iIntent = 0
+      for (let bi = 0; bi < batch.length && iIntent < intents.length; bi++) {
+        const jr = batch[bi]
+        const inx = intents[iIntent]
+        const res = rs[iIntent]
+        if (jr.eventId === inx.local.id && jr.action === inx.action) {
+          // log each individual result
+          diag.pushResult({
+            provider: ad.provider as any,
+            action: inx.action,
+            localId: inx.local.id,
+            externalId: (res as any)?.bound?.externalId,
+            calendarId: (res as any)?.bound?.calendarId,
+            etag: (res as any)?.bound?.etag,
+            result: res
+          })
+          if (res?.ok) dropIds.push(jr.journalId)
+          iIntent++
         }
       }
       if (dropIds.length) dropEntries(dropIds)
-
-      // Apply new bindings (e.g., newly created externalId)
-      for (const r of rs) {
-        if (r.ok && r.bound) {
-          params.store.rebind(r.localId, r.bound)
-        }
-      }
-
-      console.log('[sync] push success:', okIdx.length, 'of', rs.length)
     } catch (e) {
       console.warn(`[sync][push] failed for ${ad.provider}`, e)
+      diag.error({ provider: ad.provider as any, msg: `[push] ${String(e?.message || e)}` })
     }
   }
 
+  diag.log({ phase: 'note', kind: 'sync.end', msg: 'done' })
   return { ok: true }
 }
