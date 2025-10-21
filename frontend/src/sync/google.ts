@@ -2,7 +2,7 @@
 // - Prevents duplicates using extendedProperties.private.fc_local_id
 // - Maps all-day correctly (inclusive local → exclusive end.date on Google)
 // - Retries PATCH on 412 (stale etag)
-// - Rejects invalid dates with clear log (and marks push as failed so journal can be inspected)
+// - Hardens against TDZ/minifier quirks and bad dates with clear logging
 
 import { ProviderAdapter, RemoteDelta, PushIntent, PushResult, LocalEvent } from './types'
 import { getAccessToken } from '../google/oauth'
@@ -34,7 +34,7 @@ type ListResp = {
   nextSyncToken?: string
 }
 
-const MARKER_KEY = 'fc_local_id' // used in extendedProperties.private
+const MARKER_KEY = 'fc_local_id' // our idempotency marker
 
 /* ---------------- utilities ---------------- */
 
@@ -75,7 +75,7 @@ function mapGoogleToLocal(g: GoogleEvent, calId: string) {
     : undefined
 
   return {
-    id: g.id, // instance id
+    id: g.id,
     title: g.summary || '(No title)',
     start: startISO,
     end: endISO,
@@ -139,58 +139,49 @@ function isAllDayLocal(ev: LocalEvent): boolean {
   const s = new Date(ev.start!)
   const e = new Date(ev.end!)
   const startsMidnight = s.getUTCHours() === 0 && s.getUTCMinutes() === 0 && s.getUTCSeconds() === 0
-  // allow inclusive end (…:59.999) or exact-day multiples ending at 00:00 next day minus 1ms
   const endsAt59 = e.getUTCHours() === 23 && e.getUTCMinutes() === 59
-  const ms = e.getTime() - s.getTime() + 1 // inclusive window
-  const isWholeDays = ms % (24 * 60 * 60 * 1000) === 0
-  return startsMidnight && (endsAt59 || isWholeDays)
+  const msInclusive = (e.getTime() - s.getTime()) + 1
+  const fullDays = (msInclusive % (24 * 60 * 60 * 1000)) === 0
+  return startsMidnight && (endsAt59 || fullDays)
 }
 
 function toGoogleBody(ev: LocalEvent, tz?: string) {
   if (!isValidISO(ev.start) || !isValidISO(ev.end)) {
     throw new RangeError('Invalid Date')
   }
+  const body: any = {
+    summary: ev.title || '(No title)',
+    description: ev.notes || '',
+    location: ev.location || undefined,
+  }
   const allDay = isAllDayLocal(ev)
-  const s = new Date(ev.start!)
-  const e = new Date(ev.end!)
-
   if (allDay) {
+    const s = new Date(ev.start!)
+    const e = new Date(ev.end!)
     // Inclusive local end → exclusive Google end.date (next day)
     const endExclusive = new Date(e.getTime() + 1)
     const endDate = new Date(Date.UTC(endExclusive.getUTCFullYear(), endExclusive.getUTCMonth(), endExclusive.getUTCDate()))
     const startDate = new Date(Date.UTC(s.getUTCFullYear(), s.getUTCMonth(), s.getUTCDate()))
     const pad = (n: number) => String(n).padStart(2, '0')
     const dateStr = (d: Date) => `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`
-    return {
-      summary: ev.title || '(No title)',
-      description: ev.notes || '',
-      location: ev.location || undefined,
-      start: { date: dateStr(startDate) },
-      end: { date: dateStr(endDate) },
-    }
+    body.start = { date: dateStr(startDate) }
+    body.end   = { date: dateStr(endDate) }
   } else {
-    return {
-      summary: ev.title || '(No title)',
-      description: ev.notes || '',
-      location: ev.location || undefined,
-      start: { dateTime: new Date(ev.start!).toISOString(), timeZone: tz || undefined },
-      end: { dateTime: new Date(ev.end!).toISOString(), timeZone: tz || undefined },
-    }
+    body.start = { dateTime: new Date(ev.start!).toISOString(), timeZone: tz || undefined }
+    body.end   = { dateTime: new Date(ev.end!).toISOString(),   timeZone: tz || undefined }
   }
+  return body
 }
 
 /** find an existing Google event by our private local-id marker */
 async function findByMarker(calendarId: string, localId: string): Promise<GoogleEvent | null> {
   try {
-    const q = encodeURIComponent(`${MARKER_KEY}=${localId}`)
-    // Extended properties are not searchable via free-text; we fetch a small window instead.
-    // Fallback: list last 2 weeks → + 1 year to keep API calls bounded for creation/update flows.
+    // There’s no direct filter by extendedProperties; scan a bounded window
     const now = new Date()
     const timeMin = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000).toISOString()
     const timeMax = new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000).toISOString()
-
     let pageToken: string | undefined
-    for (let guard = 0; guard < 4; guard++) {
+    for (let guard = 0; guard < 6; guard++) {
       const resp = await gfetchJSON<ListResp>(`/calendars/${encodeURIComponent(calendarId)}/events`, {
         singleEvents: 'true',
         showDeleted: 'false',
@@ -200,8 +191,9 @@ async function findByMarker(calendarId: string, localId: string): Promise<Google
         ...(pageToken ? { pageToken } : {}),
       })
       const items = resp.items || []
-      for (const g of items) {
-        const mark = g.extendedProperties?.private?.[MARKER_KEY]
+      for (let i = 0; i < items.length; i++) {
+        const g = items[i]
+        const mark = g?.extendedProperties?.private?.[MARKER_KEY]
         if (mark === localId) return g
       }
       if (!resp.nextPageToken) break
@@ -216,7 +208,7 @@ async function findByMarker(calendarId: string, localId: string): Promise<Google
 /* ---------------- adapter ---------------- */
 
 export function createGoogleAdapter(opts: { accountKey?: string; calendars?: string[] }): ProviderAdapter {
-  const calendars = opts.calendars && opts.calendars.length ? opts.calendars : ['primary']
+  const calendars = (opts && Array.isArray(opts.calendars) && opts.calendars.length) ? opts.calendars : ['primary']
 
   return {
     provider: 'google',
@@ -225,10 +217,13 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
       const events: RemoteDelta[] = []
       let nextSyncToken: string | null = null
 
-      for (const calId of calendars) {
+      for (let c = 0; c < calendars.length; c++) {
+        const calId = calendars[c]
         let pageToken: string | undefined
         let useSyncToken = !!sinceToken
 
+        // paginate
+        /* eslint-disable no-constant-condition */
         while (true) {
           const params: Record<string, string> = {
             maxResults: '2500',
@@ -238,7 +233,7 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
           if (useSyncToken && sinceToken) {
             params.syncToken = sinceToken
           } else {
-            params.orderBy = 'startTime' // only when not using syncToken
+            params.orderBy = 'startTime'
             const tmin = new Date(rangeStartISO).toISOString()
             const tmax0 = new Date(rangeEndISO).toISOString()
             const tmax = (new Date(tmax0).getTime() <= new Date(tmin).getTime())
@@ -259,24 +254,18 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
               pageToken = undefined
               continue
             }
-            if (code === '429') {
-              await new Promise(r => setTimeout(r, 800))
-              continue
-            }
+            if (code === '429') { await new Promise(r => setTimeout(r, 800)); continue }
             throw e
           }
 
           const items = Array.isArray(data.items) ? data.items : []
-          for (const g of items) {
+          for (let i = 0; i < items.length; i++) {
+            const g = items[i]
             const isMaster = Array.isArray(g.recurrence) && g.recurrence.length > 0 && !g.originalStartTime
             if (isMaster) continue
 
             if (g.status === 'cancelled') {
-              events.push({
-                operation: 'delete',
-                calendarId: calId,
-                externalId: g.id,
-              })
+              events.push({ operation: 'delete', calendarId: calId, externalId: g.id })
               continue
             }
 
@@ -303,49 +292,50 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
 
     async push(intents: PushIntent[]) {
       const results: PushResult[] = []
-      if (!intents?.length) return results
+      if (!intents || intents.length === 0) return results
 
-      for (const it of intents) {
+      for (let k = 0; k < intents.length; k++) {
+        const it = intents[k]
         const ev = it.local as LocalEvent
-        const remote = Array.isArray((ev as any)._remote) ? (ev as any)._remote as Array<any> : []
-        const boundGoogle = remote.find(r => r?.provider === 'google')
-        const calendarId = (boundGoogle?.calendarId) || (calendars[0] || 'primary')
+        const remoteList = (ev && (ev as any)._remote && Array.isArray((ev as any)._remote)) ? ((ev as any)._remote as any[]) : []
+        const boundGoogle = remoteList.find(r => r && r.provider === 'google')
+        const calendarId = (boundGoogle && boundGoogle.calendarId) ? boundGoogle.calendarId : (calendars[0] || 'primary')
 
         try {
           if (it.action === 'delete') {
-            if (boundGoogle?.externalId) {
+            if (boundGoogle && boundGoogle.externalId) {
               await gfetchBody('DELETE', `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(boundGoogle.externalId)}`)
-            } else {
-              // try locate by marker and delete that
-              const found = ev.id ? await findByMarker(calendarId, ev.id) : null
-              if (found) {
-                await gfetchBody('DELETE', `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(found.id)}`)
-              }
+              results.push({ ok: true, action: 'delete', localId: ev.id })
+              continue
+            }
+            const foundForDelete = ev.id ? await findByMarker(calendarId, ev.id) : null
+            if (foundForDelete) {
+              await gfetchBody('DELETE', `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(foundForDelete.id)}`)
             }
             results.push({ ok: true, action: 'delete', localId: ev.id })
             continue
           }
 
           // CREATE or UPDATE
-          const body = toGoogleBody(ev, (ev as any).timezone)
+          let body = toGoogleBody(ev, (ev as any)?.timezone)
 
-          // always carry our idempotency marker
-          (body as any).extendedProperties = (body as any).extendedProperties || {}
-          ;(body as any).extendedProperties.private = {
-            ...(body as any).extendedProperties.private,
-            [MARKER_KEY]: ev.id,
-          }
+          // === IMPORTANT: always include our marker, without spreading an uninitialized object ===
+          const currentPriv = (body as any).extendedProperties && (body as any).extendedProperties.private
+            ? (body as any).extendedProperties.private
+            : {}
+          const newPriv: Record<string, string> = { ...currentPriv, [MARKER_KEY]: String(ev.id || '') }
+          const newExt = Object.assign({}, (body as any).extendedProperties || {}, { private: newPriv })
+          body = Object.assign({}, body, { extendedProperties: newExt })
 
-          if (!boundGoogle?.externalId) {
-            // try to find an existing event created earlier with our marker
-            const existing = ev.id ? await findByMarker(calendarId, ev.id) : null
-            if (existing) {
-              // PATCH existing instead of creating a dupe
+          if (!boundGoogle || !boundGoogle.externalId) {
+            // try to find an already-created event by our marker
+            const found = ev.id ? await findByMarker(calendarId, ev.id) : null
+            if (found) {
               const updated = await gfetchBody<GoogleEvent>(
                 'PATCH',
-                `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(existing.id)}`,
+                `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(found.id)}`,
                 body,
-                existing.etag
+                found.etag
               )
               results.push({
                 ok: true,
@@ -354,7 +344,6 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
                 bound: { provider: 'google', calendarId, externalId: updated.id, etag: updated.etag },
               })
             } else {
-              // CREATE
               const created = await gfetchBody<GoogleEvent>(
                 'POST',
                 `/calendars/${encodeURIComponent(calendarId)}/events`,
@@ -368,7 +357,7 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
               })
             }
           } else {
-            // UPDATE via PATCH (retry once without If-Match on 412)
+            // bound → PATCH (retry w/o If-Match on 412)
             const path = `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(boundGoogle.externalId)}`
             try {
               const updated = await gfetchBody<GoogleEvent>('PATCH', path, body, boundGoogle.etag)
@@ -380,7 +369,7 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
               })
             } catch (err: any) {
               if (String(err?.message || '').startsWith('412')) {
-                const updated = await gfetchBody<GoogleEvent>('PATCH', path, body /* no etag */)
+                const updated = await gfetchBody<GoogleEvent>('PATCH', path, body)
                 results.push({
                   ok: true,
                   action: 'update',
