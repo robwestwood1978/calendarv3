@@ -1,5 +1,6 @@
 // frontend/src/main.tsx
-// Reset switch (?reset=1) to clear local data if needed
+// Resets (?reset=1), bootstraps router, starts sync, wires Google connect + diagnostics button.
+
 if (typeof window !== 'undefined') {
   const url = new URL(window.location.href)
   if (url.searchParams.get('reset') === '1') {
@@ -13,6 +14,10 @@ if (typeof window !== 'undefined') {
       localStorage.removeItem('fc_my_agenda_v1')
       localStorage.removeItem('fc_feature_flags_v1')
       localStorage.removeItem('fc_google_oauth_v1')
+      localStorage.removeItem('fc_sync_cfg')
+      localStorage.removeItem('fc_sync_tokens')
+      localStorage.removeItem('fc_sync_journal')
+      localStorage.removeItem('fc_sync_shadow')
       alert('Local data cleared. Reloading…')
     } catch {}
     url.searchParams.delete('reset')
@@ -36,20 +41,52 @@ import SignInDock from './components/SignInDock'
 import { AuthProvider } from './auth/AuthProvider'
 import { migrateSliceC } from './lib/migrateSliceC'
 import './styles.css'
-import './dev/diagnostics' // ← NEW: safe diagnostics side-effect import
 
-/* === Global toaster so ?sync=on/off shows a message === */
+/* === Global toaster === */
 import Toaster from './components/Toaster'
 
-/* ===== Slice D: Sync bootstrap ===== */
+/* ===== Sync bootstrap ===== */
 import { startSyncLoop, maybeRunSync } from './sync/bootstrap'
 import { readSyncConfig, writeSyncConfig } from './sync/core'
 
-/* ===== Handle Google OAuth redirect on boot ===== */
+/* ===== Google OAuth redirect ===== */
 import { maybeHandleRedirect } from './google/oauth'
-
-// Soft import to support the Google button event bridge
 import * as GoogleOAuthMod from './google/oauth'
+
+// --- Diagnostics toggle (no IIFE mistakes)
+(function setupDiagnosticsButton() {
+  try {
+    // Ctrl/⌘ + Alt + S toggles diagnostics flag
+    window.addEventListener('keydown', (e: KeyboardEvent) => {
+      const isToggle = (e.ctrlKey || e.metaKey) && e.altKey && e.key.toLowerCase() === 's'
+      if (!isToggle) return
+      const on = !(window as any).FC_TRACE
+      ;(window as any).FC_TRACE = on
+      try { window.dispatchEvent(new CustomEvent('toast', { detail: on ? 'Diagnostics ON' : 'Diagnostics OFF' })) } catch {}
+    })
+
+    // If ?trace=1 in URL, show a floating button to open the inspector
+    const url = new URL(location.href)
+    if (url.searchParams.get('trace') === '1') {
+      const btn = document.createElement('button')
+      btn.textContent = 'Sync Inspector'
+      Object.assign(btn.style, {
+        position: 'fixed',
+        right: '12px',
+        bottom: '12px',
+        zIndex: '9999',
+        padding: '8px 10px',
+        borderRadius: '10px',
+        border: '1px solid #e5e7eb',
+        background: '#fff',
+        boxShadow: '0 2px 8px rgba(0,0,0,.1)',
+        cursor: 'pointer',
+      } as CSSStyleDeclaration)
+      btn.onclick = () => window.dispatchEvent(new CustomEvent('fc:open-sync-inspector'))
+      window.addEventListener('DOMContentLoaded', () => document.body.appendChild(btn))
+    }
+  } catch {}
+})()
 
 function handleSyncURLToggle() {
   try {
@@ -70,7 +107,7 @@ function handleSyncURLToggle() {
             calendars: cfg.providers?.google?.calendars || [],
           },
           apple: {
-            enabled: false,
+            enabled: cfg.providers?.apple?.enabled || false,
             accountKey: cfg.providers?.apple?.accountKey,
             calendars: cfg.providers?.apple?.calendars || [],
           },
@@ -81,14 +118,12 @@ function handleSyncURLToggle() {
       url.searchParams.delete('sync')
       window.history.replaceState({}, '', url.toString())
       try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Cloud sync enabled (Google).' })) } catch {}
-      setTimeout(() => { try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Cloud sync enabled (Google).' })) } catch {} }, 500)
     } else if (sync === 'off') {
       const next = { ...cfg, enabled: false }
       writeSyncConfig(next)
       url.searchParams.delete('sync')
       window.history.replaceState({}, '', url.toString())
       try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Cloud sync disabled.' })) } catch {}
-      setTimeout(() => { try { window.dispatchEvent(new CustomEvent('toast', { detail: 'Cloud sync disabled.' })) } catch {} }, 500)
     }
   } catch {
     // ignore
@@ -113,27 +148,25 @@ async function startApp() {
     history.replaceState({}, '', '/settings')
   }
 
-  // Bridge the Google connect button to your oauth module
+  // Wire the Google connect button used by GoogleConnectCard
   window.addEventListener('fc:google-oauth-start', (ev: Event) => {
     const ce = ev as CustomEvent<{ redirect?: string }>
     const redirect = ce?.detail?.redirect || '/settings'
-    const fn = (GoogleOAuthMod as any).startGoogleOAuth
+    const fn = (GoogleOAuthMod as any).beginAuth || (GoogleOAuthMod as any).startGoogleOAuth
     if (typeof fn === 'function') {
-      try {
-        fn({ redirect })
-      } catch (e) {
-        console.warn('startGoogleOAuth failed:', e)
+      try { fn(['https://www.googleapis.com/auth/calendar']) } catch (e) {
+        console.warn('Google OAuth start failed:', e)
         alert('Could not start Google sign-in.')
       }
     } else {
-      // Fallback: server route if present
+      // Fallback: legacy server route
       try {
         const url = new URL('/oauth2/start', window.location.origin)
         url.searchParams.set('provider', 'google')
         url.searchParams.set('redirect', redirect)
         window.location.assign(url.toString())
       } catch {
-        alert('Google sign-in is not configured in this build.')
+        alert('Google sign-in is not available in this build.')
       }
     }
   })
