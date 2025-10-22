@@ -177,7 +177,7 @@ function toGoogleBody(ev: LocalEvent, tz?: string) {
   }
   // ensure marker travels with every push
   const priv = { [MARKER_KEY]: String(ev.id || '') }
-  body.extendedProperties = Object.assign({}, body.extendedProperties || {}, { private: Object.assign({}, body.extendedProperties?.private || {}, ...priv) })
+  body.extendedProperties = Object.assign({}, body.extendedProperties || {}, { private: Object.assign({}, body.extendedProperties?.private || {}, priv) })
   return body
 }
 
