@@ -1,11 +1,13 @@
+// frontend/src/sync/google.ts
 // Google Calendar adapter: windowed pull (instances) + safe push (idempotent create/update/delete)
 // - Prevents duplicates using extendedProperties.private.fc_local_id
 // - Maps all-day correctly (inclusive local → exclusive end.date on Google)
 // - Retries PATCH on 412 (stale etag)
-// - Hardens against TDZ/minifier quirks and bad dates with clear logging
+// - Hardened delete path when it.local is undefined
 
 import { ProviderAdapter, RemoteDelta, PushIntent, PushResult, LocalEvent } from './types'
 import { getAccessToken } from '../google/oauth'
+import { diag } from './diag'
 
 type GoogleEvent = {
   id: string
@@ -222,8 +224,6 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
         let pageToken: string | undefined
         let useSyncToken = !!sinceToken
 
-        // paginate
-        /* eslint-disable no-constant-condition */
         while (true) {
           const params: Record<string, string> = {
             maxResults: '2500',
@@ -250,11 +250,12 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
           } catch (e: any) {
             const code = e?.message
             if (code === '409' || code === '410' || code === '400') {
+              // invalid sync token or bad request: fall back to time-window
               useSyncToken = false
               pageToken = undefined
               continue
             }
-            if (code === '429') { await new Promise(r => setTimeout(r, 800)); continue }
+            if (code === '429') { await new Promise(r => setTimeout(r, 800 + Math.random()*400)); continue }
             throw e
           }
 
@@ -296,30 +297,40 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
 
       for (let k = 0; k < intents.length; k++) {
         const it = intents[k]
-        const ev = it.local as LocalEvent
+        const ev: LocalEvent | undefined = it.local as any
+
+        // remote binding (if any)
         const remoteList = (ev && (ev as any)._remote && Array.isArray((ev as any)._remote)) ? ((ev as any)._remote as any[]) : []
         const boundGoogle = remoteList.find(r => r && r.provider === 'google')
         const calendarId = (boundGoogle && boundGoogle.calendarId) ? boundGoogle.calendarId : (calendars[0] || 'primary')
 
         try {
           if (it.action === 'delete') {
+            // If bound → DELETE by externalId; else attempt marker search only if we have local id
             if (boundGoogle && boundGoogle.externalId) {
               await gfetchBody('DELETE', `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(boundGoogle.externalId)}`)
-              results.push({ ok: true, action: 'delete', localId: ev.id })
+              results.push({ ok: true, action: 'delete', localId: ev?.id })
               continue
             }
-            const foundForDelete = ev.id ? await findByMarker(calendarId, ev.id) : null
-            if (foundForDelete) {
-              await gfetchBody('DELETE', `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(foundForDelete.id)}`)
+            if (ev?.id) {
+              const foundForDelete = await findByMarker(calendarId, ev.id)
+              if (foundForDelete) {
+                await gfetchBody('DELETE', `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(foundForDelete.id)}`)
+              }
             }
-            results.push({ ok: true, action: 'delete', localId: ev.id })
+            results.push({ ok: true, action: 'delete', localId: ev?.id })
             continue
           }
 
-          // CREATE or UPDATE
+          // CREATE or UPDATE requires a local snapshot
+          if (!ev) {
+            results.push({ ok: false, action: it.action, localId: undefined, error: 'missing local snapshot' })
+            continue
+          }
+
           let body = toGoogleBody(ev, (ev as any)?.timezone)
 
-          // === IMPORTANT: always include our marker, without spreading an uninitialized object ===
+          // Ensure our private marker is always present
           const currentPriv = (body as any).extendedProperties && (body as any).extendedProperties.private
             ? (body as any).extendedProperties.private
             : {}
@@ -382,8 +393,8 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
             }
           }
         } catch (err: any) {
-          console.warn('[google.push] failed', err)
-          results.push({ ok: false, action: it.action, localId: ev.id, error: String(err?.message || err) })
+          diag.google({ msg: 'push.fail', error: String(err?.message || err), action: it.action, localId: ev?.id })
+          results.push({ ok: false, action: it.action, localId: ev?.id, error: String(err?.message || err) })
         }
       }
 
