@@ -1,8 +1,10 @@
 // frontend/src/sync/google.ts
 // Google Calendar adapter: windowed pull (instances) + safe push (idempotent create/update/delete)
 // - Prevents duplicates using extendedProperties.private.fc_local_id
+// - Client-wins debounce: ignores remote deltas for a short window after a successful local push
 // - Maps all-day correctly (inclusive local → exclusive end.date on Google)
 // - Retries PATCH on 412 (stale etag)
+// - Handles 409/410/400 (sync token fallback) and 429 (backoff)
 // - Hardened delete path when it.local is undefined
 
 import { ProviderAdapter, RemoteDelta, PushIntent, PushResult, LocalEvent } from './types'
@@ -37,6 +39,29 @@ type ListResp = {
 }
 
 const MARKER_KEY = 'fc_local_id' // our idempotency marker
+
+/* ---------------- client-wins debounce guard ---------------- */
+
+const GUARD_PREFIX = 'fc_push_guard_'
+const GUARD_WINDOW_MS = 12_000 // 12s: enough to cover most pull-before-push races
+
+function guardKey(localId: string) { return `${GUARD_PREFIX}${localId}` }
+
+function markJustPushed(localId?: string) {
+  if (!localId) return
+  try { localStorage.setItem(guardKey(localId), String(Date.now())) } catch {}
+}
+
+function isGuarded(localId?: string): boolean {
+  if (!localId) return false
+  try {
+    const raw = localStorage.getItem(guardKey(localId))
+    if (!raw) return false
+    const ts = Number(raw)
+    if (!Number.isFinite(ts)) return false
+    return (Date.now() - ts) <= GUARD_WINDOW_MS
+  } catch { return false }
+}
 
 /* ---------------- utilities ---------------- */
 
@@ -265,7 +290,16 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
             const isMaster = Array.isArray(g.recurrence) && g.recurrence.length > 0 && !g.originalStartTime
             if (isMaster) continue
 
+            const markLocalId = g?.extendedProperties?.private?.[MARKER_KEY]
+
+            // Client-wins debounce: if we just pushed this localId, ignore the remote delta this cycle
+            if (markLocalId && isGuarded(markLocalId)) {
+              diag.pull({ provider: 'google', kind: 'pull.skip.guard', localId: markLocalId, externalId: g.id })
+              continue
+            }
+
             if (g.status === 'cancelled') {
+              // only emit delete if not guarded
               events.push({ operation: 'delete', calendarId: calId, externalId: g.id })
               continue
             }
@@ -309,6 +343,7 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
             // If bound → DELETE by externalId; else attempt marker search only if we have local id
             if (boundGoogle && boundGoogle.externalId) {
               await gfetchBody('DELETE', `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(boundGoogle.externalId)}`)
+              markJustPushed(ev?.id) // debounce future pull
               results.push({ ok: true, action: 'delete', localId: ev?.id })
               continue
             }
@@ -317,6 +352,7 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
               if (foundForDelete) {
                 await gfetchBody('DELETE', `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(foundForDelete.id)}`)
               }
+              markJustPushed(ev.id)
             }
             results.push({ ok: true, action: 'delete', localId: ev?.id })
             continue
@@ -348,6 +384,7 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
                 body,
                 found.etag
               )
+              markJustPushed(ev.id)
               results.push({
                 ok: true,
                 action: 'update',
@@ -360,6 +397,7 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
                 `/calendars/${encodeURIComponent(calendarId)}/events`,
                 body
               )
+              markJustPushed(ev.id)
               results.push({
                 ok: true,
                 action: 'create',
@@ -372,6 +410,7 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
             const path = `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(boundGoogle.externalId)}`
             try {
               const updated = await gfetchBody<GoogleEvent>('PATCH', path, body, boundGoogle.etag)
+              markJustPushed(ev.id)
               results.push({
                 ok: true,
                 action: 'update',
@@ -381,6 +420,7 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
             } catch (err: any) {
               if (String(err?.message || '').startsWith('412')) {
                 const updated = await gfetchBody<GoogleEvent>('PATCH', path, body)
+                markJustPushed(ev.id)
                 results.push({
                   ok: true,
                   action: 'update',
