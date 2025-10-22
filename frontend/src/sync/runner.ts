@@ -218,7 +218,7 @@ export async function runSyncOnce(): Promise<{ ok: boolean; detail?: string }> {
 }
 
 // ---------- Wire a “Sync now” event for your button ----------
-function onSyncNow = async () => { try { await runSyncOnce() } catch {} }
+const onSyncNow = async () => { try { await runSyncOnce() } catch {} }
 
 try {
   window.addEventListener('fc:sync-now', onSyncNow as any)
