@@ -16,16 +16,15 @@ type TokenState = {
   }
 }
 
+function nowISO() { return new Date().toISOString() }
+
 export function readSyncConfig(): SyncConfig {
-  return readJSON<SyncConfig>(LS.SYNC_CFG, {
-    enabled: false,
-    providers: { google: { enabled: false }, apple: { enabled: false } },
-    windowWeeks: 8,
-  })
+  const raw = localStorage.getItem(LS.SYNC_CONFIG)
+  try { return raw ? JSON.parse(raw) : { enabled: false, providers: {} } } catch { return { enabled: false, providers: {} } }
 }
 
 export function writeSyncConfig(cfg: SyncConfig) {
-  writeJSON(LS.SYNC_CFG, cfg)
+  try { localStorage.setItem(LS.SYNC_CONFIG, JSON.stringify(cfg)) } catch {}
 }
 
 export function readTokens(): TokenState {
@@ -41,72 +40,57 @@ export type LocalStore = {
   listRange(startISO: string, endISO: string): LocalEvent[]
   upsertMany(rows: LocalEvent[]): void
   applyDeletes(localIds: string[]): void
-  rebind(localId: string, boundRef: { provider: string; calendarId: string; externalId: string; etag?: string }): void
-}
-
-function isISO(x: any): x is string {
-  if (typeof x !== 'string') return false
-  const d = new Date(x)
-  return !isNaN(+d)
-}
-
-function validLocal(ev: any): ev is LocalEvent {
-  return ev && typeof ev === 'object' && typeof ev.id === 'string' && isISO(ev.start) && isISO(ev.end)
 }
 
 export async function runSyncOnce(params: {
   adapters: ProviderAdapter[]
   store: LocalStore
   now?: Date
-}): Promise<{ ok: boolean; detail?: string }> {
-  const cfg = readSyncConfig()
-  if (!cfg.enabled) return { ok: true, detail: 'sync disabled' }
+}) {
+  const { adapters, store } = params
+  const now = params.now ?? new Date()
 
-  const now = (params.now ? DateTime.fromJSDate(params.now) : DateTime.local())
-  const start = now.startOf('day').toISO()!
-  const end = now.plus({ weeks: cfg.windowWeeks }).endOf('day').toISO()!
+  diag.log({ phase: 'note', kind: 'sync.start', msg: 'begin' })
+
+  // --- PULL window ---
+  const t0 = DateTime.fromJSDate(now)
+  const rangeStartISO = t0.minus({ days: 30 }).toISO()!
+  const rangeEndISO = t0.plus({ days: 365 }).toISO()!
 
   const tokens = readTokens()
-  diag.log({ phase: 'note', kind: 'sync.start', msg: `window ${start} → ${end}` })
 
-  // 1) PULL — provider deltas -> local
-  for (const ad of params.adapters) {
-    const t = tokens[ad.provider]?.sinceToken ?? null
+  for (const ad of adapters) {
     try {
-      const res = await ad.pull({ sinceToken: t, rangeStartISO: start, rangeEndISO: end })
+      const state = tokens[ad.provider] || { sinceToken: null }
+      const res = await ad.pull({ sinceToken: state.sinceToken, rangeStartISO, rangeEndISO })
 
       const upserts: LocalEvent[] = []
+      const deletes: string[] = []
 
       for (const d of res.events) {
         if (d.operation === 'delete') {
-          diag.pullDelete({
+          deletes.push(d.externalId)
+          diag.pull({
             provider: ad.provider as any,
-            calendarId: d.calendarId,
+            kind: 'pull.delete',
             externalId: d.externalId,
-            etag: d.etag,
+            calendarId: d.calendarId
           })
-          // left to your store to map remote → local and delete
-          continue
-        } else if (d.payload) {
-          const p = d.payload as any
-          diag.pullUpsert({
-            provider: ad.provider as any,
-            calendarId: d.calendarId,
-            externalId: d.externalId,
-            etag: d.etag,
-            localId: p.id,
-            after: { id: p.id, title: p.title, start: p.start, end: p.end, allDay: p.allDay }
-          })
+        } else if (d.operation === 'upsert' && d.payload) {
           upserts.push({ ...(d.payload as any) })
+          diag.pull({
+            provider: ad.provider as any,
+            kind: 'pull.upsert',
+            externalId: d.externalId,
+            calendarId: d.calendarId
+          })
         }
       }
 
-      if (upserts.length) {
-        params.store.upsertMany(upserts)
-        diag.reconcile({ msg: `upserts:${upserts.length}` })
-      }
+      if (upserts.length) store.upsertMany(upserts)
+      if (deletes.length) store.applyDeletes(deletes)
 
-      tokens[ad.provider] = { sinceToken: res.token ?? null, lastRunISO: now.toISO()! }
+      tokens[ad.provider] = { sinceToken: res.token, lastRunISO: now.toISOString() }
       writeTokens(tokens)
     } catch (e: any) {
       console.warn(`[sync][pull] failed for ${ad.provider}`, e)
@@ -114,32 +98,36 @@ export async function runSyncOnce(params: {
     }
   }
 
-  // 2) PUSH — drain journal as push intents (use journal snapshots, not listRange)
-  const batch = popBatch(50)
-  if (batch.length === 0) {
-    diag.log({ phase: 'note', kind: 'sync.end', msg: 'no journal' })
+  // --- JOURNAL → PUSH ---
+  const batch = popBatch()
+  if (!batch || batch.length === 0) {
+    diag.log({ phase: 'note', kind: 'sync.end', msg: 'journal had no entries' })
     return { ok: true }
   }
 
+  // Build one PushIntent per journal row with the current local snapshot
   const intents: PushIntent[] = []
-  for (const j of batch) {
-    let local: any
-    if (j.action === 'delete') {
-      local = j.before || null
+  for (let i = 0; i < batch.length; i++) {
+    const jr = batch[i]
+    const localList = store.listRange(rangeStartISO, rangeEndISO)
+    const local = localList.find(e => e.id === jr.eventId)
+
+    if (jr.action === 'delete') {
+      intents.push({ journalId: jr.journalId, action: 'delete', local })
+      diag.journal({ action: 'delete', localId: jr.eventId })
     } else {
-      local = j.after || null
+      if (!local) {
+        // cannot update without the local snapshot → keep entry for next round
+        diag.error({ msg: `[journal] missing local snapshot for ${jr.eventId}` })
+        continue
+      }
+      intents.push({
+        journalId: jr.journalId,
+        action: jr.action,
+        local,
+        after: { id: local.id, title: local.title, start: local.start, end: local.end, allDay: local.allDay }
+      })
     }
-    if (!validLocal(local)) {
-      console.warn('[sync][push] skip journal row with invalid local snapshot:', j)
-      diag.error({ kind: 'journal.invalid', msg: 'invalid local snapshot', before: j.before, after: j.after })
-      continue
-    }
-    intents.push({ action: j.action, local })
-    diag.journal({
-      action: j.action,
-      localId: local.id,
-      after: { id: local.id, title: local.title, start: local.start, end: local.end, allDay: local.allDay }
-    })
   }
 
   if (intents.length === 0) {
@@ -154,25 +142,30 @@ export async function runSyncOnce(params: {
       // success accounting & drop matched rows
       const dropIds: string[] = []
       let iIntent = 0
-      for (let bi = 0; bi < batch.length && iIntent < intents.length; bi++) {
-        const jr = batch[bi]
-        const inx = intents[iIntent]
-        const res = rs[iIntent]
-        if (jr.eventId === inx.local.id && jr.action === inx.action) {
-          // log each individual result
-          diag.pushResult({
-            provider: ad.provider as any,
-            action: inx.action,
-            localId: inx.local.id,
-            externalId: (res as any)?.bound?.externalId,
-            calendarId: (res as any)?.bound?.calendarId,
-            etag: (res as any)?.bound?.etag,
-            result: res
-          })
-          if (res?.ok) dropIds.push(jr.journalId)
-          iIntent++
-        }
+
+      for (let i = 0; i < intents.length; i++) {
+        const inx = intents[i]
+        const jr = batch[iIntent] // positions align by construction
+
+        const res = rs[i] as PushResult | undefined
+
+        // log each individual result
+        diag.pushResult({
+          provider: ad.provider as any,
+          action: inx.action,
+          localId: inx.local?.id,
+          externalId: (res as any)?.bound?.externalId,
+          calendarId: (res as any)?.bound?.calendarId,
+          etag: (res as any)?.bound?.etag,
+          result: res
+        })
+
+        // *** CRITICAL FIX: only drop when we're definitively bound ***
+        if (res?.ok && (res as any)?.bound?.externalId) dropIds.push(jr.journalId)
+
+        iIntent++
       }
+
       if (dropIds.length) dropEntries(dropIds)
     } catch (e) {
       console.warn(`[sync][push] failed for ${ad.provider}`, e)
