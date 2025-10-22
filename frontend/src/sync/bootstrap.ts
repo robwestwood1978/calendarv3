@@ -1,57 +1,90 @@
-// Bootstraps sync: journalizer + run loop + Google adapter wiring.
+// frontend/src/sync/bootstrap.ts
+// PATCH v3.1 — Sync bootstrap/loop + “Sync now” wiring.
+// - Safe interval loop (single-flight guarded via runner.ts)
+// - Visibility tick (nudge when tab becomes active)
+// - Global event + DOM hook for your Sync button(s)
+// - No-ops cleanly when sync is disabled
 
-import { runSyncOnce } from './core'
-import { localStore } from './localStore'
-import { startJournalizer } from './journalizer'
 import { readSyncConfig } from './core'
-import { createGoogleAdapter } from './google'
+import { runSyncOnce, isRunning, lastRunAt } from './runner'
 
-let loopOn = false
-let timer: any = null
+const PERIOD_MS = 30_000 // how often to try a run (30s). Adjust if you like.
 
-function buildAdapters() {
-  const cfg = readSyncConfig()
-  const ads = []
-  if (cfg.providers?.google?.enabled) {
-    ads.push(createGoogleAdapter({
-      accountKey: cfg.providers.google.accountKey || undefined,
-      calendars: cfg.providers.google.calendars && cfg.providers.google.calendars.length
-        ? cfg.providers.google.calendars
-        : ['primary'],
-    }))
-  }
-  // (Apple adapter would be added here later)
-  return ads
+let loopId: number | null = null
+let wiredDom = false
+
+function toast(msg: string) {
+  try { window.dispatchEvent(new CustomEvent('toast', { detail: msg })) } catch {}
 }
 
-export async function maybeRunSync() {
+/** Try a sync run if enabled and not already running */
+async function maybeTick() {
   const cfg = readSyncConfig()
-  if (!cfg.enabled) return
-  try {
-    console.log('[sync] run…', new Date().toISOString())
-    await runSyncOnce({ adapters: buildAdapters(), store: localStore })
-    console.log('[sync] done:', { ok: true })
-  } catch (e) {
-    console.warn('[sync] run failed:', e)
+  if (!cfg?.enabled) return
+  if (isRunning()) return
+  await runSyncOnce()
+}
+
+/** DOM wiring: any element with [data-fc-sync-now] will trigger a run */
+function wireDomSyncButton() {
+  if (wiredDom) return
+  wiredDom = true
+  document.addEventListener('click', (e) => {
+    const t = e.target as HTMLElement | null
+    if (!t) return
+    const btn = t.closest('[data-fc-sync-now]') as HTMLElement | null
+    if (!btn) return
+    e.preventDefault()
+    e.stopPropagation()
+    // Dispatch the same custom event runner listens for
+    window.dispatchEvent(new CustomEvent('fc:sync-now'))
+    toast('Syncing…')
+  })
+}
+
+/** Public: start the background loop + hooks */
+export function startSyncLoop() {
+  const cfg = readSyncConfig()
+  if (!cfg?.enabled) {
+    // If loop is running but sync is now disabled, stop it
+    if (loopId != null) {
+      clearInterval(loopId)
+      loopId = null
+    }
+    return
+  }
+
+  // Wire one-time helpers
+  wireDomSyncButton()
+
+  // Interval loop
+  if (loopId == null) {
+    loopId = window.setInterval(() => { void maybeTick() }, PERIOD_MS)
+  }
+
+  // Nudge when the tab becomes visible (and we haven’t run very recently)
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return
+    const last = lastRunAt()
+    if (!last) { void maybeTick(); return }
+    try {
+      const ago = Date.now() - new Date(last).getTime()
+      if (ago > 60_000 && !isRunning()) void maybeTick()
+    } catch {
+      void maybeTick()
+    }
+  })
+
+  // Expose manual trigger for debugging
+  ;(window as any).FC_syncNow = async () => {
+    toast('Syncing…')
+    await runSyncOnce()
   }
 }
 
-export function startSyncLoop(intervalMs = 30_000) {
-  if (loopOn) return
-  loopOn = true
-
-  // Start the journalizer so we actually get push entries
-  startJournalizer()
-
-  // Tick on visibility change (fast catch-up when the tab refocuses)
-  const onVis = () => { if (document.visibilityState === 'visible') maybeRunSync() }
-  document.addEventListener('visibilitychange', onVis)
-
-  // Initial run + interval
-  maybeRunSync()
-  timer = setInterval(maybeRunSync, intervalMs)
-
-  // Expose controls for debugging
-  ;(window as any).__sync_run = maybeRunSync
-  ;(window as any).__sync_stop = () => { clearInterval(timer); loopOn = false }
+/** Public: try a one-off sync at boot (safe if disabled) */
+export function maybeRunSync() {
+  const cfg = readSyncConfig()
+  if (!cfg?.enabled) return
+  void maybeTick()
 }
