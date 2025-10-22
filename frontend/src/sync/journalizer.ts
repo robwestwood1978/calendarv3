@@ -1,200 +1,114 @@
 // frontend/src/sync/journalizer.ts
-// Watches the local event store and records mutations to the journal.
-// - Defensive against missing/invalid storage
-// - No 'for..of' over undefined
-// - Stable hashing so harmless field order changes don’t spam updates
+// Duplicate-safe, remote-aware journalizer.
+// Keeps a shadow copy of the local events. On changes, computes a minimal diff
+// and records only *local* mutations to the journal (create / update / delete).
 
+import { LocalEvent, JournalAction } from './types'
+import { getKeys, readJSON, writeJSON } from './storage'
 import { recordMutation } from './journal'
 
-// ---- Storage keys (match your app) ----
-const LS_EVENTS = 'fc_events_v1'
-const LS_SHADOW = 'fc_journal_shadow_v1'
+const LS = getKeys()
 
-// ---- Types (loose to tolerate your current shapes) ----
-type AnyEvent = {
-  id: string
-  title?: string
-  start: string
-  end: string
-  allDay?: boolean
-  location?: string
-  notes?: string
-  attendees?: string[]
-  tags?: string[]
-  colour?: string
-  // optional bindings used by push
-  _remote?: Array<{
-    provider: string
-    calendarId?: string
-    externalId?: string
-    etag?: string
-  }>
-  [k: string]: any
+type ShadowState = {
+  rev: number
+  byId: Record<string, LocalEvent>
 }
 
-type Shadow = {
-  // keep the full event for “before” snapshots, plus a hash for quick comparison
-  map: Record<string, { hash: string; ev: AnyEvent }>
-  // version for future migrations
-  v: 1
+function readShadow(): ShadowState {
+  return readJSON<ShadowState>(LS.SYNC_SHADOW, { rev: 0, byId: {} })
+}
+function writeShadow(st: ShadowState) {
+  writeJSON(LS.SYNC_SHADOW, st)
 }
 
-// ---- Utilities ----
-function safeParse<T>(val: string | null): T | null {
-  if (!val) return null
-  try { return JSON.parse(val) as T } catch { return null }
-}
-
-/** Load current events from your local store (defensive for several shapes). */
-function loadCurrent(): AnyEvent[] {
-  const raw = safeParse<any>(localStorage.getItem(LS_EVENTS))
-  if (!raw) return []
-
-  // common shapes:
-  // 1) direct array
-  if (Array.isArray(raw)) {
-    return raw.filter(isEventLike)
-  }
-
-  // 2) { events: [...] }
-  if (Array.isArray(raw.events)) {
-    return raw.events.filter(isEventLike)
-  }
-
-  // 3) { byId: { id: ev } }
-  if (raw.byId && typeof raw.byId === 'object') {
-    return Object.values(raw.byId).filter(isEventLike)
-  }
-
-  // Unknown shape → no-op
-  return []
-}
-
-function isISO(x: any): boolean {
-  if (typeof x !== 'string') return false
-  const d = new Date(x)
-  return !isNaN(+d)
-}
-
-function isEventLike(x: any): x is AnyEvent {
-  return x && typeof x === 'object' && typeof x.id === 'string' && isISO(x.start) && isISO(x.end)
-}
-
-function readShadow(): Shadow {
-  const s = safeParse<Shadow>(localStorage.getItem(LS_SHADOW))
-  if (s && s.v === 1 && s.map && typeof s.map === 'object') return s
-  return { v: 1, map: {} }
-}
-
-function writeShadow(sh: Shadow) {
-  localStorage.setItem(LS_SHADOW, JSON.stringify(sh))
-}
-
-/** Minimal, stable hash of fields we want to sync on. */
-function hashEvent(ev: AnyEvent): string {
-  // normalise some fields
-  const attendees = Array.isArray(ev.attendees) ? [...ev.attendees].sort() : []
-  const tags = Array.isArray(ev.tags) ? [...ev.tags].sort() : []
-
-  // important: use stable key order
-  const obj = {
-    title: ev.title || '',
-    start: new Date(ev.start).toISOString(),
-    end: new Date(ev.end).toISOString(),
-    allDay: !!ev.allDay,
-    location: ev.location || '',
-    notes: ev.notes || '',
-    attendees,
-    tags,
-    colour: ev.colour || '',
-  }
-  return JSON.stringify(obj)
-}
-
-function toBeforeMinimal(ev: AnyEvent) {
-  return {
-    id: ev.id,
-    title: ev.title,
-    start: ev.start,
-    end: ev.end,
-    allDay: ev.allDay,
-    location: ev.location,
-    notes: ev.notes,
-    attendees: ev.attendees,
-    tags: ev.tags,
-    colour: ev.colour,
-    _remote: ev._remote,
-  }
-}
-
-// ---- Diff + journal ----
-function diffAndJournal(prev: Shadow, curr: AnyEvent[]) {
-  try {
-    const nextShadow: Shadow = { v: 1, map: {} }
-
-    // Build current map & detect creates / updates
-    for (let i = 0; i < curr.length; i++) {
-      const ev = curr[i]
-      if (!isEventLike(ev)) continue
-      const h = hashEvent(ev)
-      nextShadow.map[ev.id] = { hash: h, ev: toBeforeMinimal(ev) }
-
-      const prevRec = prev.map[ev.id]
-      if (!prevRec) {
-        // CREATE
-        recordMutation('create', undefined, toBeforeMinimal(ev), ev.id)
-        continue
-      }
-      if (prevRec.hash !== h) {
-        // UPDATE
-        recordMutation('update', prevRec.ev, toBeforeMinimal(ev), ev.id)
-      }
-    }
-
-    // Detect deletes
-    const currIds = new Set(Object.keys(nextShadow.map))
-    for (const id of Object.keys(prev.map)) {
-      if (!currIds.has(id)) {
-        const before = prev.map[id]?.ev
-        recordMutation('delete', before, undefined, id)
-      }
-    }
-
-    writeShadow(nextShadow)
-    console.log('[journalizer] shadow updated. events:', Object.keys(nextShadow.map).length)
-  } catch (err) {
-    console.warn('[journalizer] error', err)
-  }
-}
-
-// ---- Runner ----
-let rafId = 0
-function scheduleRun() {
-  if (rafId) return
-  rafId = requestAnimationFrame(() => {
-    rafId = 0
-    const prev = readShadow()
-    const curr = loadCurrent()
-    diffAndJournal(prev, curr)
+function keyOf(e: LocalEvent) {
+  // fields that affect external write
+  return JSON.stringify({
+    title: e.title || '',
+    start: e.start, end: e.end,
+    allDay: !!e.allDay,
+    location: e.location || '',
+    notes: e.notes || '',
   })
+}
+
+function looksRemoteOnlyChange(next: LocalEvent, prev?: LocalEvent): boolean {
+  // if only _remote array/etag changes (coming from pull), skip journaling
+  if (!prev) return false
+  const coreNext = keyOf(next)
+  const corePrev = keyOf(prev)
+  return coreNext === corePrev
 }
 
 export function startJournalizer() {
-  // initial
-  scheduleRun()
-  // react to app-level event and cross-tab changes
-  window.addEventListener('fc:events-changed', scheduleRun)
-  window.addEventListener('storage', (e) => {
-    if (e.key === LS_EVENTS) scheduleRun()
-  })
-
-  // small debug helpers
-  ;(window as any).fcDebugJournalDump = () => {
-    console.log('shadow:', readShadow())
-    console.log('events:', loadCurrent())
+  // Build initial shadow
+  const st0 = readShadow()
+  if (st0.rev === 0) {
+    const now = readLocal()
+    const byId: Record<string, LocalEvent> = {}
+    for (const e of now) byId[e.id] = e
+    writeShadow({ rev: 1, byId })
   }
-  console.log('[journalizer] ready')
+
+  function onTick() {
+    try {
+      const cur = readLocal()
+      const sh = readShadow()
+
+      const curById: Record<string, LocalEvent> = {}
+      for (const e of cur) curById[e.id] = e
+
+      // Detect deletions
+      for (const id of Object.keys(sh.byId)) {
+        if (!curById[id]) {
+          // deletion (local only). Do not journal if previous had a google binding and we suspect a remote delete pull?
+          // We still record local delete so push can propagate.
+          recordMutation('delete' as JournalAction, sh.byId[id], undefined, id)
+        }
+      }
+
+      // Detect creates/updates
+      for (const e of cur) {
+        const prev = sh.byId[e.id]
+        if (!prev) {
+          // new
+          recordMutation('create' as JournalAction, undefined, e, e.id)
+        } else {
+          const beforeKey = keyOf(prev)
+          const afterKey = keyOf(e)
+          if (afterKey !== beforeKey) {
+            // skip if change is only remote metadata (_remote changed)
+            if (!looksRemoteOnlyChange(e, prev)) {
+              recordMutation('update' as JournalAction, prev, e, e.id)
+            }
+          }
+        }
+      }
+
+      // Update shadow
+      const byId: Record<string, LocalEvent> = {}
+      for (const e of cur) byId[e.id] = e
+      writeShadow({ rev: sh.rev + 1, byId })
+
+      try { console.log('[journalizer] shadow updated. events:', cur.length) } catch {}
+      try { window.dispatchEvent(new CustomEvent('fc:journal-tick')) } catch {}
+    } catch (err) {
+      try { console.warn('[journalizer] error', err) } catch {}
+    }
+  }
+
+  // tick when local events change or periodically from sync loop
+  window.addEventListener('fc:events-changed', onTick)
+  window.addEventListener('fc:journal-poll', onTick)
+  // Prime first run
+  setTimeout(onTick, 0)
 }
 
-// Auto-start if module loaded before main bootstrap wires it
-try { startJournalizer() } catch {}
+function readLocal(): LocalEvent[] {
+  try {
+    const raw = localStorage.getItem(LS.EVENTS)
+    if (!raw) return []
+    const val = JSON.parse(raw)
+    return Array.isArray(val) ? val as LocalEvent[] : Array.isArray(val?.events) ? val.events : []
+  } catch { return [] }
+}
