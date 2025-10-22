@@ -1,125 +1,103 @@
 // frontend/src/components/dev/SyncInspector.tsx
-// Lightweight diagnostics panel. Opens via keyboard (Ctrl/Cmd+Alt+S) or window event.
+// Lightweight inspector: reads from localStorage keys and shows current state.
+// Opens via: window.dispatchEvent(new CustomEvent('fc:open-sync-inspector'))
 
 import React from 'react'
+import ReactDOM from 'react-dom'
 
-type SyncLog = {
-  at: string
-  phase: 'run' | 'pull' | 'push' | 'done' | 'error'
-  note?: string
-  data?: any
+const KEYS = [
+  'fc_events_v1',
+  'fc_settings_v1',
+  'fc_settings_v2',
+  'fc_settings_v3',
+  'fc_users_v1',
+  'fc_current_user_v1',
+  'fc_my_agenda_v1',
+  'fc_feature_flags_v1',
+  'fc_google_oauth_v1',
+  // sync-specific:
+  'fc_sync_cfg',
+  'fc_sync_tokens',
+  'fc_sync_journal',
+  'fc_sync_shadow',
+]
+
+function read(key: string) {
+  try { return JSON.parse(localStorage.getItem(key) || 'null') } catch { return null }
 }
-
-const LS_KEY = 'fc_sync_diag_v1'
-
-function readLog(): SyncLog[] {
-  try { return JSON.parse(localStorage.getItem(LS_KEY) || '[]') } catch { return [] }
-}
-function writeLog(rows: SyncLog[]) {
-  try { localStorage.setItem(LS_KEY, JSON.stringify(rows.slice(-200))) } catch {}
-}
-
-export function appendDiag(entry: SyncLog) {
-  const rows = readLog()
-  rows.push(entry)
-  writeLog(rows)
-  try { window.dispatchEvent(new CustomEvent('fc:sync-diag-updated')) } catch {}
-}
-
-// global hotkey and quick floating button (only when ?trace=1)
-(function bootstrapOnce() {
-  if ((window as any).__SYNC_INSPECTOR_WIRED__) return
-  ;(window as any).__SYNC_INSPECTOR_WIRED__ = true
-
-  window.addEventListener('keydown', (e) => {
-    try {
-      if (!((e.ctrlKey || e.metaKey) && e.altKey && e.key.toLowerCase() === 's')) return
-      window.dispatchEvent(new CustomEvent('fc:open-sync-inspector'))
-    } catch {}
-  })
-
-  try {
-    const url = new URL(location.href)
-    if (url.searchParams.get('trace') !== '1') return
-    const btn = document.createElement('button')
-    btn.textContent = 'Sync Inspector'
-    Object.assign(btn.style, {
-      position: 'fixed', right: '12px', bottom: '12px', zIndex: '9999',
-      padding: '8px 10px', borderRadius: '10px', border: '1px solid #e5e7eb',
-      background: '#fff', boxShadow: '0 2px 8px rgba(0,0,0,.1)', cursor: 'pointer'
-    })
-    btn.onclick = () => window.dispatchEvent(new CustomEvent('fc:open-sync-inspector'))
-    document.addEventListener('DOMContentLoaded', () => document.body.appendChild(btn))
-  } catch {}
-})()
 
 export default function SyncInspector() {
   const [open, setOpen] = React.useState(false)
-  const [rows, setRows] = React.useState<SyncLog[]>(() => readLog())
+  const [now, setNow] = React.useState<string>(() => new Date().toISOString())
 
   React.useEffect(() => {
-    const onOpen = () => setOpen(true)
-    const onUpd = () => setRows(readLog())
-    window.addEventListener('fc:open-sync-inspector', onOpen)
-    window.addEventListener('fc:sync-diag-updated', onUpd)
-    return () => {
-      window.removeEventListener('fc:open-sync-inspector', onOpen)
-      window.removeEventListener('fc:sync-diag-updated', onUpd)
-    }
+    const openH = () => setOpen(true)
+    window.addEventListener('fc:open-sync-inspector', openH as any)
+    return () => window.removeEventListener('fc:open-sync-inspector', openH as any)
   }, [])
 
-  if (!open) return null
+  React.useEffect(() => {
+    const t = setInterval(() => setNow(new Date().toISOString()), 1000)
+    return () => clearInterval(t)
+  }, [])
 
-  function clear() {
-    writeLog([])
-    setRows([])
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid #e5e7eb', background: '#fff' }}
+      >
+        Open Sync Inspector
+      </button>
+    )
   }
 
-  function syncNow() {
-    try { window.dispatchEvent(new CustomEvent('fc:sync-now')) } catch {}
-  }
-
-  return (
-    <div style={backdrop} onClick={() => setOpen(false)}>
-      <div style={panel} onClick={e => e.stopPropagation()}>
-        <div style={head}>
-          <strong>Sync Inspector</strong>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button onClick={syncNow}>Sync now</button>
-            <button onClick={clear}>Clear</button>
-            <button onClick={() => setOpen(false)}>Close</button>
-          </div>
+  const content = (
+    <div style={wrap}>
+      <div style={panel}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <h3 style={{ margin: 0 }}>Sync Inspector</h3>
+          <button onClick={() => setOpen(false)}>Close</button>
         </div>
-        <div style={body}>
-          {rows.length === 0 && <div style={{ opacity: .7 }}>No diagnostics yet.</div>}
-          {rows.slice().reverse().map((r, i) => (
-            <div key={i} style={{ borderBottom: '1px solid #e5e7eb', padding: '6px 0' }}>
-              <div style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 12 }}>
-                <span style={{ opacity: .7 }}>{r.at}</span> · <b>{r.phase}</b> {r.note ? `— ${r.note}` : ''}
+        <div style={{ fontSize: 12, color: '#64748b', marginTop: 4 }}>Now: {now}</div>
+
+        <div style={{ marginTop: 12, display: 'grid', gap: 10 }}>
+          {KEYS.map(k => {
+            const val = read(k)
+            const text = val == null ? 'null' : JSON.stringify(val, null, 2)
+            return (
+              <div key={k}>
+                <div style={{ fontWeight: 600 }}>{k}</div>
+                <pre style={pre}>{text}</pre>
               </div>
-              {r.data ? (
-                <pre style={{ margin: 0, fontSize: 12, overflowX: 'auto' }}>
-{JSON.stringify(r.data, null, 2)}
-                </pre>
-              ) : null}
-            </div>
-          ))}
+            )
+          })}
         </div>
       </div>
     </div>
   )
+
+  // inline render (no portal) to keep simple & portable
+  return content
 }
 
-const backdrop: React.CSSProperties = {
-  position: 'fixed', inset: 0, background: 'rgba(0,0,0,.45)',
-  display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000
+const wrap: React.CSSProperties = {
+  padding: 12,
+  border: '1px solid #e5e7eb',
+  borderRadius: 12,
+  background: '#fff',
 }
-const panel: React.CSSProperties = {
-  width: 780, maxWidth: '95%', maxHeight: '90vh', background: '#fff',
-  borderRadius: 12, border: '1px solid #e5e7eb', display: 'flex', flexDirection: 'column'
+
+const panel: React.CSSProperties = { display: 'grid', gap: 8 }
+
+const pre: React.CSSProperties = {
+  margin: '6px 0 0 0',
+  padding: 8,
+  background: '#0b1220',
+  color: '#e2e8f0',
+  borderRadius: 8,
+  maxHeight: 240,
+  overflow: 'auto',
+  fontSize: 12,
 }
-const head: React.CSSProperties = {
-  padding: '10px 12px', display: 'flex', justifyContent: 'space-between',
-  alignItems: 'center', borderBottom: '1px solid #e5e7eb'
-}
-const body: React.CSSProperties = { padding: 12, overflow: 'auto' }

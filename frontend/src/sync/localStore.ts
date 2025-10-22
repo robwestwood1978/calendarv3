@@ -1,101 +1,69 @@
-// frontend/src/sync/localStore.ts
-// Thin local-store adapter used by the sync engine.
-// Persists to the same LocalStorage keys your app already uses.
+// LocalStore adapter used by the sync engine to read/write your app’s events.
 
-import { LocalEvent } from './types'
-import { getKeys, readJSON, writeJSON } from './storage'
+import type { LocalEvent } from './types'
+import type { LocalStore } from './core'
+import { DateTime } from 'luxon'
 
-const LS = getKeys()
+const KEYS = ['fc_events_v3', 'fc_events_v2', 'fc_events_v1']
 
-type EventState = {
-  events: LocalEvent[]
+function readEvents(): LocalEvent[] {
+  for (const k of KEYS) {
+    const s = localStorage.getItem(k)
+    if (!s) continue
+    try {
+      const arr = JSON.parse(s)
+      if (Array.isArray(arr)) return arr as LocalEvent[]
+    } catch {}
+  }
+  return []
 }
 
-/** ------- helpers ------- */
-
-function readAll(): LocalEvent[] {
-  // your app has historically stored events under LS.EVENTS (fc_events_v1)
-  const st = readJSON<EventState | LocalEvent[]>(LS.EVENTS, { events: [] } as any)
-  // tolerate older shapes
-  const list: LocalEvent[] = Array.isArray(st) ? st : Array.isArray((st as any).events) ? (st as any).events : []
-  // sanitize minimal shape
-  return list.filter(e => e && e.id && e.start && e.end)
-}
-
-function writeAll(list: LocalEvent[]) {
-  // keep the same shape your app expects (array at root)
-  writeJSON(LS.EVENTS, list)
+function writeEvents(list: LocalEvent[]) {
+  // Prefer the newest key if present, else fall back to v1
+  const dest = localStorage.getItem('fc_events_v3') != null
+    ? 'fc_events_v3'
+    : localStorage.getItem('fc_events_v2') != null
+      ? 'fc_events_v2'
+      : 'fc_events_v1'
+  localStorage.setItem(dest, JSON.stringify(list))
   try { window.dispatchEvent(new Event('fc:events-changed')) } catch {}
 }
 
-/** Merge/upsert by id */
-function upsertArray(base: LocalEvent[], rows: LocalEvent[]): LocalEvent[] {
-  const byId = new Map<string, LocalEvent>(base.map(e => [e.id, e]))
-  for (const row of rows) {
-    const prev = byId.get(row.id)
-    if (!prev) {
-      byId.set(row.id, { ...row })
-    } else {
-      byId.set(row.id, { ...prev, ...row })
-    }
-  }
-  return Array.from(byId.values())
-}
+export const localStore: LocalStore = {
+  listRange(startISO: string, endISO: string) {
+    const start = DateTime.fromISO(startISO)
+    const end = DateTime.fromISO(endISO)
+    return readEvents().filter(e => {
+      const s = DateTime.fromISO(e.start)
+      const f = DateTime.fromISO(e.end)
+      return s.isValid && f.isValid && (
+        (s >= start && s <= end) || (f >= start && f <= end) || (s < start && f > end)
+      )
+    })
+  },
 
-/** ------- LocalStore implementation ------- */
+  upsertMany(rows: LocalEvent[]) {
+    const idx = new Map(readEvents().map(e => [e.id, e] as const))
+    for (const r of rows) idx.set(r.id, r)
+    writeEvents(Array.from(idx.values()))
+  },
 
-export type LocalStore = {
-  listRange(startISO: string, endISO: string): LocalEvent[]
-  upsertMany(rows: LocalEvent[]): void
-  applyDeletes(localIds: string[]): void
-  rebind(localId: string, boundRef: { provider: string; calendarId: string; externalId: string; etag?: string }): void
-}
+  applyDeletes(localIds: string[]) {
+    const set = new Set(localIds)
+    const next = readEvents().filter(e => !set.has(e.id))
+    writeEvents(next)
+  },
 
-export function getLocalStore(): LocalStore {
-  return {
-    listRange(startISO: string, endISO: string) {
-      const s = new Date(startISO).getTime()
-      const e = new Date(endISO).getTime()
-      const all = readAll()
-      return all.filter(ev => {
-        const a = new Date(ev.start).getTime()
-        const b = new Date(ev.end).getTime()
-        if (Number.isNaN(a) || Number.isNaN(b)) return false
-        // overlap test
-        return a < e && b > s
-      })
-    },
-
-    upsertMany(rows: LocalEvent[]) {
-      if (!rows || rows.length === 0) return
-      const base = readAll()
-      const next = upsertArray(base, rows)
-      writeAll(next)
-    },
-
-    applyDeletes(localIds: string[]) {
-      if (!localIds || localIds.length === 0) return
-      const kill = new Set(localIds)
-      const base = readAll()
-      const next = base.filter(e => !kill.has(e.id))
-      if (next.length !== base.length) writeAll(next)
-    },
-
-    rebind(localId, boundRef) {
-      const base = readAll()
-      const i = base.findIndex(e => e.id === localId)
-      if (i === -1) return
-      const ev = base[i]
-      const remotes = Array.isArray((ev as any)._remote) ? (ev as any)._remote as any[] : []
-      const existing = remotes.find(r => r?.provider === boundRef.provider)
-      let nextRemotes: any[]
-      if (existing) {
-        nextRemotes = remotes.map(r => r?.provider === boundRef.provider ? { ...r, ...boundRef } : r)
-      } else {
-        nextRemotes = [...remotes, { ...boundRef }]
-      }
-      base[i] = { ...ev, _remote: nextRemotes as any }
-      writeAll(base)
-    },
-  }
+  rebind(localId, boundRef) {
+    const list = readEvents()
+    const i = list.findIndex(e => e.id === localId)
+    if (i < 0) return
+    const cur = list[i] as any
+    const rem = Array.isArray(cur._remote) ? cur._remote.slice() : []
+    const j = rem.findIndex((r: any) => r?.provider === boundRef.provider && r?.calendarId === boundRef.calendarId)
+    if (j >= 0) rem[j] = { ...rem[j], ...boundRef }
+    else rem.push({ ...boundRef })
+    list[i] = { ...cur, _remote: rem }
+    writeEvents(list)
+  },
 }
