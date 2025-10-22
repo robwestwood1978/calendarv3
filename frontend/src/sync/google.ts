@@ -5,6 +5,7 @@
 // - Debounce guard to skip stale remote deltas briefly after our push
 // - 412 retry, 409/410/400 syncToken fallback, 429 backoff
 // - Correct all-day mapping
+// - **FIX** per-calendar syncToken (JSON map) so events created in Google appear reliably
 
 import { ProviderAdapter, RemoteDelta, PushIntent, PushResult, LocalEvent } from './types'
 import { getAccessToken } from '../google/oauth'
@@ -42,16 +43,30 @@ const MARKER_KEY = 'fc_local_id' // our idempotency marker
 /* ---------------- client-wins debounce guard ---------------- */
 
 const GUARD_PREFIX = 'fc_push_guard_'
+const GUARD_PREFIX_X = 'fc_push_guard_x_' // guard by external id (when Google echo lacks our private marker)
 const GUARD_WINDOW_MS = 12_000
 
 function guardKey(localId: string) { return `${GUARD_PREFIX}${localId}` }
-function markJustPushed(localId?: string) { if (localId) try { localStorage.setItem(guardKey(localId), String(Date.now())) } catch {} }
-function isGuarded(localId?: string): boolean {
-  if (!localId) return false
+function guardKeyX(externalId: string) { return `${GUARD_PREFIX_X}${externalId}` }
+
+function markJustPushed(localId?: string, externalId?: string) {
   try {
-    const raw = localStorage.getItem(guardKey(localId)); if (!raw) return false
-    const ts = Number(raw); if (!Number.isFinite(ts)) return false
-    return (Date.now() - ts) <= GUARD_WINDOW_MS
+    if (localId) localStorage.setItem(guardKey(localId), String(Date.now()))
+    if (externalId) localStorage.setItem(guardKeyX(externalId), String(Date.now()))
+  } catch {}
+}
+
+function isFresh(ts?: string | null) {
+  if (!ts) return false
+  const n = Number(ts); if (!Number.isFinite(n)) return false
+  return (Date.now() - n) <= GUARD_WINDOW_MS
+}
+
+function isGuarded(localId?: string, externalId?: string): boolean {
+  try {
+    const a = localId ? localStorage.getItem(guardKey(localId)) : null
+    const b = externalId ? localStorage.getItem(guardKeyX(externalId)) : null
+    return isFresh(a) || isFresh(b)
   } catch { return false }
 }
 
@@ -61,6 +76,7 @@ const recentByExternal = new Map<string, { localId: string, ts: number }>()
 const RECENT_TTL = 20_000
 
 function rememberBinding(externalId: string, localId: string) {
+  if (!externalId || !localId) return
   recentByExternal.set(externalId, { localId, ts: Date.now() })
 }
 function lookupRecentLocalId(externalId?: string): string | undefined {
@@ -211,22 +227,34 @@ async function findByMarker(calendarId: string, localId: string): Promise<Google
 export function createGoogleAdapter(opts: { accountKey?: string; calendars?: string[] }): ProviderAdapter {
   const calendars = (opts && Array.isArray(opts.calendars) && opts.calendars.length) ? opts.calendars : ['primary']
 
+  // Parse and persist per-calendar sync tokens as a JSON object.
+  const readSyncMap = (token?: string | null): Record<string, string> => {
+    if (!token) return {}
+    try {
+      const obj = JSON.parse(token)
+      return obj && typeof obj === 'object' ? obj : {}
+    } catch { return {} }
+  }
+  const writeSyncMap = (m: Record<string, string>): string => JSON.stringify(m)
+
   return {
     provider: 'google',
 
     async pull({ sinceToken, rangeStartISO, rangeEndISO }) {
       const events: RemoteDelta[] = []
-      let nextSyncToken: string | null = null
+      const givenMap = readSyncMap(sinceToken)
+
+      const nextMap: Record<string, string> = { ...givenMap }
 
       for (let c = 0; c < calendars.length; c++) {
         const calId = calendars[c]
         let pageToken: string | undefined
-        let useSyncToken = !!sinceToken
+        let useSyncToken = !!givenMap[calId]
 
         while (true) {
           const params: Record<string, string> = { maxResults: '2500', showDeleted: 'true', singleEvents: 'true' }
-          if (useSyncToken && sinceToken) {
-            params.syncToken = sinceToken
+          if (useSyncToken && givenMap[calId]) {
+            params.syncToken = givenMap[calId]
           } else {
             params.orderBy = 'startTime'
             const tmin = new Date(rangeStartISO).toISOString()
@@ -256,8 +284,8 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
 
             const markLocalId = g?.extendedProperties?.private?.[MARKER_KEY]
 
-            // Debounce: skip stale remote for just-pushed local ids
-            if (markLocalId && isGuarded(markLocalId)) {
+            // Debounce: skip stale remote for just-pushed local ids, OR by external id if Google echo lacks our private marker.
+            if (isGuarded(markLocalId, g.id)) {
               diag.pull({ provider: 'google', kind: 'pull.skip.guard', localId: markLocalId, externalId: g.id })
               continue
             }
@@ -282,12 +310,13 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
           }
 
           if (data.nextPageToken) { pageToken = data.nextPageToken; continue }
-          nextSyncToken = data.nextSyncToken || nextSyncToken
+          if (data.nextSyncToken) nextMap[calId] = data.nextSyncToken
           break
         }
       }
 
-      return { token: nextSyncToken || sinceToken || null, events }
+      const finalToken = writeSyncMap(nextMap)
+      return { token: finalToken, events }
     },
 
     async push(intents: PushIntent[]) {
@@ -305,7 +334,7 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
           if (it.action === 'delete') {
             if (boundGoogle && boundGoogle.externalId) {
               await gfetchBody('DELETE', `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(boundGoogle.externalId)}`)
-              markJustPushed(ev?.id)
+              markJustPushed(ev?.id, boundGoogle.externalId)
               rememberBinding(boundGoogle.externalId, ev?.id || '') // harmless; allows stitch if Google echoes a ghost row
               results.push({ ok: true, action: 'delete', localId: ev?.id })
               continue
@@ -313,7 +342,7 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
             if (ev?.id) {
               const foundForDelete = await findByMarker(calendarId, ev.id)
               if (foundForDelete) await gfetchBody('DELETE', `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(foundForDelete.id)}`)
-              markJustPushed(ev.id)
+              markJustPushed(ev.id, foundForDelete?.id)
             }
             results.push({ ok: true, action: 'delete', localId: ev?.id })
             continue
@@ -327,23 +356,23 @@ export function createGoogleAdapter(opts: { accountKey?: string; calendars?: str
             const found = ev.id ? await findByMarker(calendarId, ev.id) : null
             if (found) {
               const updated = await gfetchBody<GoogleEvent>('PATCH', `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(found.id)}`, body, found.etag)
-              markJustPushed(ev.id); rememberBinding(updated.id, ev.id)
+              markJustPushed(ev.id, updated.id); rememberBinding(updated.id, ev.id)
               results.push({ ok: true, action: 'update', localId: ev.id, bound: { provider: 'google', calendarId, externalId: updated.id, etag: updated.etag } })
             } else {
               const created = await gfetchBody<GoogleEvent>('POST', `/calendars/${encodeURIComponent(calendarId)}/events`, body)
-              markJustPushed(ev.id); rememberBinding(created.id, ev.id)
+              markJustPushed(ev.id, created.id); rememberBinding(created.id, ev.id)
               results.push({ ok: true, action: 'create', localId: ev.id, bound: { provider: 'google', calendarId, externalId: created.id, etag: created.etag } })
             }
           } else {
             const path = `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(boundGoogle.externalId)}`
             try {
               const updated = await gfetchBody<GoogleEvent>('PATCH', path, body, boundGoogle.etag)
-              markJustPushed(ev.id); rememberBinding(updated.id, ev.id)
+              markJustPushed(ev.id, updated.id); rememberBinding(updated.id, ev.id)
               results.push({ ok: true, action: 'update', localId: ev.id, bound: { provider: 'google', calendarId, externalId: updated.id, etag: updated.etag } })
             } catch (err: any) {
               if (String(err?.message || '').startsWith('412')) {
                 const updated = await gfetchBody<GoogleEvent>('PATCH', path, body)
-                markJustPushed(ev.id); rememberBinding(updated.id, ev.id)
+                markJustPushed(ev.id, updated.id); rememberBinding(updated.id, ev.id)
                 results.push({ ok: true, action: 'update', localId: ev.id, bound: { provider: 'google', calendarId, externalId: updated.id, etag: updated.etag } })
               } else {
                 throw err
